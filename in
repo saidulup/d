@@ -1,0 +1,14 @@
+{
+  "_id": {
+    "$oid": "6936f3c0bdab98b8f57bd423"
+  },
+  "name": "saidulu",
+  "email_id": "saidulu.pagidimarry5@optum.com",
+  "access_role": "Org Admin",
+  "assigned_projects": {},
+  "preferences": {
+    "theme": "light"
+  },
+  "created_time": "2025-09-27T10:17:20.391008+00:00",
+  "updated_time": "2025-09-27T10:17:20.391008+00:00"
+}

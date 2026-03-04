@@ -1,0 +1,630 @@
+
+-- ============================================================
+-- Modular DSE Engine - Python Stored Procedures (Snowpark)
+-- Uses session.sql() only (no SQL EXECUTE IMMEDIATE).
+-- Communicates via TEMP tables created in the session.
+-- Key rule: metrics "deleted today" (present in prior, missing in current)
+--           are EXCLUDED from final scoring and return code.
+-- ============================================================
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PLAN_GET_PY(
+  DSID VARCHAR,
+  ENVIRONMENT_ID NUMBER
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+
+def run(session: Session, DSID: str, ENVIRONMENT_ID: int) -> str:
+    session.sql(
+        "CREATE OR REPLACE TEMP TABLE TMP_DSE_PLAN AS "
+        "SELECT "
+        "  TP.DSID::VARCHAR AS DSID, "
+        "  TP.TARGETTABLE::VARCHAR AS TARGETTABLE, "
+        "  TP.TESTTYPE::VARCHAR AS TESTTYPE, "
+        "  TP.RESULTTYPE::VARCHAR AS RESULTTYPE, "
+        "  UPPER(TP.EXECUTIONSTEP)::VARCHAR AS EXECUTIONSTEP, "
+        "  TP.TESTCASEDESCRIPTION::VARCHAR AS TESTCASEDESCRIPTION, "
+        "  NVL(TP.FREQUENCYCHECK,0)::NUMBER AS FREQUENCYCHECK, "
+        "  CASE WHEN TP.TESTTYPE='SINGLE DATAPOINT' THEN TP.RESULTSETCOLS ELSE TP.RESULTSETCOLS-1 END::NUMBER AS RESULTSETCOLS, "
+        "  TP.THRESHOLDID::VARCHAR AS THRESHOLDID, "
+        "  JC.JOBNAME::VARCHAR AS JOBNAME "
+        "FROM DATASENTINEL_COMPACT.DSE_TESTPLAN TP "
+        "JOIN DATASENTINEL_COMPACT.DSE_JOB_CONFIG JC ON JC.JOBID = TP.JOBID "
+        f"WHERE TP.DSID = '{DSID}'"
+    ).collect()
+
+    tgt = session.sql("SELECT UPPER(TARGETTABLE) FROM TMP_DSE_PLAN").collect()
+    if not tgt or tgt[0][0] != "DSE_TESTRESULTS":
+        return "NON_DSE_TESTRESULTS"
+    return "OK"
+$$;
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PRIOR_LOAD_PY(
+  DSID VARCHAR,
+  ENVIRONMENT_ID NUMBER
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+
+def run(session: Session, DSID: str, ENVIRONMENT_ID: int) -> str:
+    session.sql(
+        "CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR_META AS "
+        "SELECT MAX(RUNID) AS MAX_RUNID "
+        "FROM DATASENTINEL_COMPACT.DSE_TESTRESULTS "
+        f"WHERE DSID='{DSID}' AND ENVIRONMENT_ID={ENVIRONMENT_ID} AND ACTV_IND='Y'"
+    ).collect()
+
+    max_run = session.sql("SELECT MAX_RUNID FROM TMP_DSE_PRIOR_META").collect()[0][0]
+
+    if max_run is None:
+        session.sql(
+            "CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR AS "
+            "SELECT NULL::NUMBER AS METRICID, NULL::VARCHAR AS METRICNAME, "
+            "NULL::VARCHAR AS PRIORRESULT1,NULL::VARCHAR AS PRIORRESULT2,NULL::VARCHAR AS PRIORRESULT3,NULL::VARCHAR AS PRIORRESULT4,NULL::VARCHAR AS PRIORRESULT5, "
+            "NULL::VARCHAR AS PRIORRESULT6,NULL::VARCHAR AS PRIORRESULT7,NULL::VARCHAR AS PRIORRESULT8,NULL::VARCHAR AS PRIORRESULT9,NULL::VARCHAR AS PRIORRESULT10, "
+            "0::NUMBER AS PRIOR_FREQUENCYCOUNTER "
+            "WHERE 1=0"
+        ).collect()
+        session.sql("CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR_MAX AS SELECT 0::NUMBER AS MAX_METRICID").collect()
+        return "NO_PRIOR"
+
+    session.sql(
+        "CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR AS "
+        "SELECT "
+        "  f.value:METRICID::NUMBER AS METRICID, "
+        "  f.value:METRICNAME::VARCHAR AS METRICNAME, "
+        "  f.value:RESULT1::VARCHAR AS PRIORRESULT1, "
+        "  f.value:RESULT2::VARCHAR AS PRIORRESULT2, "
+        "  f.value:RESULT3::VARCHAR AS PRIORRESULT3, "
+        "  f.value:RESULT4::VARCHAR AS PRIORRESULT4, "
+        "  f.value:RESULT5::VARCHAR AS PRIORRESULT5, "
+        "  f.value:RESULT6::VARCHAR AS PRIORRESULT6, "
+        "  f.value:RESULT7::VARCHAR AS PRIORRESULT7, "
+        "  f.value:RESULT8::VARCHAR AS PRIORRESULT8, "
+        "  f.value:RESULT9::VARCHAR AS PRIORRESULT9, "
+        "  f.value:RESULT10::VARCHAR AS PRIORRESULT10, "
+        "  NVL(p.FREQUENCYCOUNTER,0)::NUMBER AS PRIOR_FREQUENCYCOUNTER "
+        "FROM DATASENTINEL_COMPACT.DSE_TESTRESULTS p, "
+        "     LATERAL FLATTEN(input => p.METRICRESULTS) f "
+        f"WHERE p.DSID='{DSID}' AND p.ENVIRONMENT_ID={ENVIRONMENT_ID} AND p.RUNID={int(max_run)}"
+    ).collect()
+
+    session.sql(
+        "CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR_MAX AS "
+        "SELECT COALESCE(MAX(METRICID),0) AS MAX_METRICID "
+        "FROM TMP_DSE_PRIOR "
+        "WHERE METRICID IS NOT NULL AND METRICID<>0"
+    ).collect()
+    return "OK"
+$$;
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_CURRENT_LOAD_PY(
+  DSID VARCHAR,
+  RUNID VARCHAR,
+  TGT_TMP VARCHAR
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+import re
+
+def _safe_name(s: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_]', '_', s or '')
+
+def run(session: Session, DSID: str, RUNID: str, TGT_TMP: str) -> str:
+    job = session.sql("SELECT JOBNAME FROM TMP_DSE_PLAN").collect()[0][0]
+    mdp_table = f"TEMP_MDP_{_safe_name(job)}_{_safe_name(DSID)}".upper()
+
+    session.sql(f"CREATE OR REPLACE TEMP TABLE {mdp_table} AS SELECT * FROM {TGT_TMP}").collect()
+
+    cols = session.sql(
+        "SELECT ordinal_position, column_name "
+        "FROM information_schema.columns "
+        f"WHERE table_name='{mdp_table}' "
+        "ORDER BY ordinal_position"
+    ).collect()
+
+    if not cols or len(cols) < 2:
+        session.sql("CREATE OR REPLACE TEMP TABLE TMP_DSE_CUR AS SELECT NULL::VARCHAR AS METRICNAME WHERE 1=0").collect()
+        return "EMPTY_CUR"
+
+    metric_col = cols[0][1]
+    result_cols = [c[1] for c in cols[1:11]]
+
+    exprs = []
+    for i, c in enumerate(result_cols, start=1):
+        exprs.append(
+            f"IFF(TRY_TO_DECIMAL(\"{c}\") IS NOT NULL, "
+            f"    TO_VARCHAR(TRY_TO_DECIMAL(\"{c}\")), "
+            f"    IFF(LOWER(TO_VARCHAR(\"{c}\"))='nan','',TO_VARCHAR(\"{c}\"))"
+            f") AS RESULT{i}"
+        )
+    for i in range(len(result_cols)+1, 11):
+        exprs.append(f"NULL::VARCHAR AS RESULT{i}")
+
+    session.sql(
+        "CREATE OR REPLACE TEMP TABLE TMP_DSE_CUR AS "
+        f"SELECT \"{metric_col}\"::VARCHAR AS METRICNAME, {', '.join(exprs)} "
+        f"FROM {mdp_table}"
+    ).collect()
+    return "OK"
+$$;
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_EVALUATE_PY(
+  DSID VARCHAR,
+  RUNID VARCHAR,
+  ENVIRONMENT_ID NUMBER
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+
+def run(session: Session, DSID: str, RUNID: str, ENVIRONMENT_ID: int) -> str:
+    eval_sql = f'''
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_PLAN_V AS
+    SELECT
+      DSID,
+      UPPER(TARGETTABLE) AS TARGETTABLE,
+      TESTTYPE,
+      RESULTTYPE,
+      EXECUTIONSTEP,
+      TESTCASEDESCRIPTION,
+      FREQUENCYCHECK,
+      LEAST(10, RESULTSETCOLS)::NUMBER AS RESULTSETCOLS,
+      THRESHOLDID,
+      JOBNAME
+    FROM TMP_DSE_PLAN;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_PRIOR_MAX_V AS
+    SELECT COALESCE(MAX_METRICID,0) AS MAX_METRICID
+    FROM TMP_DSE_PRIOR_MAX;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_BASE AS
+    SELECT
+      '{DSID}'::VARCHAR AS DSID,
+      p.JOBNAME::VARCHAR AS JOBNAME,
+      p.EXECUTIONSTEP::VARCHAR AS EXECUTIONSTEP,
+      {ENVIRONMENT_ID}::NUMBER AS ENVIRONMENT_ID,
+      p.TESTCASEDESCRIPTION::VARCHAR AS TESTCASEDESCRIPTION,
+      p.TESTTYPE::VARCHAR AS TESTTYPE,
+      p.FREQUENCYCHECK::NUMBER AS FREQUENCYCHECK,
+      p.RESULTSETCOLS::NUMBER AS RESULTSETCOLS,
+      p.THRESHOLDID::VARCHAR AS THRESHOLDID,
+      COALESCE(c.METRICNAME, pr.METRICNAME) AS METRICNAME,
+      IFF(c.METRICNAME IS NULL AND pr.METRICNAME IS NOT NULL, 1, 0) AS IS_DELETED,
+      CASE
+        WHEN p.TESTTYPE IN ('SINGLE DATAPOINT','MINUS QUERY','GETPROFILEKEY') THEN 0
+        WHEN pr.METRICID IS NOT NULL THEN pr.METRICID
+        ELSE (SELECT MAX_METRICID FROM TMP_DSE_PRIOR_MAX_V)
+             + ROW_NUMBER() OVER (ORDER BY COALESCE(c.METRICNAME, pr.METRICNAME))
+      END AS METRICID,
+      c.RESULT1, c.RESULT2, c.RESULT3, c.RESULT4, c.RESULT5, c.RESULT6, c.RESULT7, c.RESULT8, c.RESULT9, c.RESULT10,
+      pr.PRIORRESULT1, pr.PRIORRESULT2, pr.PRIORRESULT3, pr.PRIORRESULT4, pr.PRIORRESULT5,
+      pr.PRIORRESULT6, pr.PRIORRESULT7, pr.PRIORRESULT8, pr.PRIORRESULT9, pr.PRIORRESULT10,
+      CASE
+        WHEN p.FREQUENCYCHECK > 0
+         AND pr.METRICNAME IS NOT NULL
+         AND COALESCE(c.RESULT1,'0')=COALESCE(pr.PRIORRESULT1,'0')
+         AND COALESCE(c.RESULT2,'0')=COALESCE(pr.PRIORRESULT2,'0')
+         AND COALESCE(c.RESULT3,'0')=COALESCE(pr.PRIORRESULT3,'0')
+         AND COALESCE(c.RESULT4,'0')=COALESCE(pr.PRIORRESULT4,'0')
+         AND COALESCE(c.RESULT5,'0')=COALESCE(pr.PRIORRESULT5,'0')
+         AND COALESCE(c.RESULT6,'0')=COALESCE(pr.PRIORRESULT6,'0')
+         AND COALESCE(c.RESULT7,'0')=COALESCE(pr.PRIORRESULT7,'0')
+         AND COALESCE(c.RESULT8,'0')=COALESCE(pr.PRIORRESULT8,'0')
+         AND COALESCE(c.RESULT9,'0')=COALESCE(pr.PRIORRESULT9,'0')
+         AND COALESCE(c.RESULT10,'0')=COALESCE(pr.PRIORRESULT10,'0')
+        THEN NVL(pr.PRIOR_FREQUENCYCOUNTER,0) + 1
+        ELSE 0
+      END AS FREQUENCYCOUNTER
+    FROM TMP_DSE_PLAN_V p
+    FULL OUTER JOIN TMP_DSE_CUR c ON 1=1
+    FULL OUTER JOIN TMP_DSE_PRIOR pr ON COALESCE(c.METRICNAME,'') = COALESCE(pr.METRICNAME,'');
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_BASE1 AS
+    SELECT *
+    FROM TMP_DSE_BASE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY COALESCE(METRICNAME,'') ORDER BY METRICID) = 1;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_IDXS AS
+    SELECT seq4()+1 AS IDX
+    FROM TABLE(GENERATOR(ROWCOUNT => 10))
+    WHERE (seq4()+1) <= (SELECT RESULTSETCOLS FROM TMP_DSE_PLAN_V);
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_THRESHOLD_MAP AS
+    SELECT
+      i.IDX,
+      NULLIF(TRIM(SPLIT_PART((SELECT THRESHOLDID FROM TMP_DSE_PLAN_V), ',', i.IDX)), '') AS THRESHOLDID
+    FROM TMP_DSE_IDXS i;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_LONG AS
+    SELECT
+      b.*,
+      i.IDX,
+      CASE i.IDX
+        WHEN 1 THEN b.RESULT1 WHEN 2 THEN b.RESULT2 WHEN 3 THEN b.RESULT3 WHEN 4 THEN b.RESULT4 WHEN 5 THEN b.RESULT5
+        WHEN 6 THEN b.RESULT6 WHEN 7 THEN b.RESULT7 WHEN 8 THEN b.RESULT8 WHEN 9 THEN b.RESULT9 WHEN 10 THEN b.RESULT10
+      END AS RESULTX,
+      CASE i.IDX
+        WHEN 1 THEN b.PRIORRESULT1 WHEN 2 THEN b.PRIORRESULT2 WHEN 3 THEN b.PRIORRESULT3 WHEN 4 THEN b.PRIORRESULT4 WHEN 5 THEN b.PRIORRESULT5
+        WHEN 6 THEN b.PRIORRESULT6 WHEN 7 THEN b.PRIORRESULT7 WHEN 8 THEN b.PRIORRESULT8 WHEN 9 THEN b.PRIORRESULT9 WHEN 10 THEN b.PRIORRESULT10
+      END AS PRIORX,
+      tm.THRESHOLDID
+    FROM TMP_DSE_BASE1 b
+    JOIN TMP_DSE_IDXS i ON 1=1
+    LEFT JOIN TMP_DSE_THRESHOLD_MAP tm ON tm.IDX = i.IDX;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_EVAL AS
+    SELECT
+      L.*,
+      TRY_TO_DECIMAL(L.RESULTX) AS RESULT_NUM,
+      TRY_TO_DECIMAL(L.PRIORX) AS PRIOR_NUM,
+      T.thresholdtype,
+      NVL(T.floorvalue,-1) AS floorvalue,
+      NVL(T.ceilingvalue,-1) AS ceilingvalue,
+      NVL(T.minwarningthreshold,'NA') AS minwarningthreshold,
+      NVL(T.maxwarningthreshold,'NA') AS maxwarningthreshold,
+      NVL(T.minfailthreshold,'NA') AS minfailthreshold,
+      NVL(T.maxfailthreshold,'NA') AS maxfailthreshold
+    FROM TMP_DSE_LONG L
+    LEFT JOIN DATASENTINEL_COMPACT.DSE_THRESHOLD T
+      ON TRY_TO_NUMBER(L.THRESHOLDID) = T.thresholdId;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_METRIC_CALC AS
+    SELECT
+      E.*,
+      CASE
+        WHEN E.RESULT_NUM IS NOT NULL AND E.PRIOR_NUM IS NOT NULL THEN TO_VARCHAR(E.RESULT_NUM - E.PRIOR_NUM)
+        WHEN E.RESULT_NUM IS NOT NULL AND E.PRIOR_NUM IS NULL THEN IFF(E.RESULTX IS NULL,'NA',E.RESULTX)
+        WHEN E.RESULT_NUM IS NULL AND E.RESULTX IS NOT NULL THEN 'NA'
+        WHEN E.RESULTX IS NULL THEN NULL
+        ELSE 'NA'
+      END AS DELTAX,
+      CASE
+        WHEN E.RESULT_NUM IS NULL THEN 'NA'
+        WHEN E.PRIORX IS NULL OR E.PRIOR_NUM IS NULL OR E.PRIOR_NUM = 0 THEN
+          CASE
+            WHEN TO_NUMBER('{RUNID}')=1 THEN '0'
+            WHEN TO_NUMBER('{RUNID}')<>1 AND E.RESULTX IS NOT NULL THEN '1'
+            ELSE 'NA'
+          END
+        ELSE
+          CASE
+            WHEN E.PRIOR_NUM > 0 THEN TO_VARCHAR((E.RESULT_NUM - E.PRIOR_NUM) / E.PRIOR_NUM)
+            ELSE TO_VARCHAR(E.RESULT_NUM)
+          END
+      END AS PERCENTCHANGEX
+    FROM TMP_DSE_EVAL E;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_STATUS_LONG AS
+    SELECT
+      C.*,
+      CASE
+        WHEN C.IS_DELETED = 1 THEN NULL
+        WHEN C.TESTTYPE = 'MINUS QUERY' AND C.IDX = 1 THEN
+          CASE
+            WHEN COALESCE(C.RESULTX,'0')='0' AND C.RESULTX IS NOT NULL THEN 'PASS'
+            WHEN C.RESULTX IS NULL THEN NULL
+            ELSE 'FAIL'
+          END
+        WHEN C.THRESHOLDID IS NOT NULL AND C.THRESHOLDID <> '' THEN
+          CASE
+            WHEN C.RESULT_NUM IS NULL THEN 'FAIL'
+            ELSE
+              CASE
+                WHEN C.thresholdtype = 'PERCENT' THEN
+                  CASE
+                    WHEN TRY_TO_DECIMAL(C.PERCENTCHANGEX) IS NULL THEN 'FAIL'
+                    ELSE
+                      CASE
+                        WHEN (
+                          (C.floorvalue > -1 AND C.ceilingvalue = -1 AND C.RESULT_NUM >= C.floorvalue) OR
+                          (C.ceilingvalue > -1 AND C.floorvalue = -1 AND C.RESULT_NUM <= C.ceilingvalue) OR
+                          (C.floorvalue = -1 AND C.ceilingvalue = -1) OR
+                          (C.floorvalue > -1 AND C.ceilingvalue > -1 AND C.RESULT_NUM BETWEEN C.floorvalue AND C.ceilingvalue)
+                        )
+                        THEN
+                          CASE
+                            WHEN (C.minwarningthreshold<>'NA' AND C.maxwarningthreshold<>'NA' AND C.minfailthreshold<>'NA' AND C.maxfailthreshold<>'NA') THEN
+                              CASE
+                                WHEN TRY_TO_DECIMAL(C.PERCENTCHANGEX) BETWEEN TRY_TO_DECIMAL(C.minwarningthreshold) AND TRY_TO_DECIMAL(C.maxwarningthreshold) THEN 'PASS'
+                                WHEN (TRY_TO_DECIMAL(C.PERCENTCHANGEX) < TRY_TO_DECIMAL(C.minwarningthreshold) AND TRY_TO_DECIMAL(C.PERCENTCHANGEX) >= TRY_TO_DECIMAL(C.minfailthreshold))
+                                  OR (TRY_TO_DECIMAL(C.PERCENTCHANGEX) > TRY_TO_DECIMAL(C.maxwarningthreshold) AND TRY_TO_DECIMAL(C.PERCENTCHANGEX) <= TRY_TO_DECIMAL(C.maxfailthreshold)) THEN 'WARNING'
+                                WHEN TRY_TO_DECIMAL(C.PERCENTCHANGEX) < TRY_TO_DECIMAL(C.minfailthreshold)
+                                  OR TRY_TO_DECIMAL(C.PERCENTCHANGEX) > TRY_TO_DECIMAL(C.maxfailthreshold) THEN 'FAIL'
+                                ELSE 'FAIL'
+                              END
+                            WHEN (C.minwarningthreshold<>'NA' AND C.maxwarningthreshold<>'NA' AND (C.minfailthreshold='NA' OR C.maxfailthreshold='NA')) THEN
+                              CASE
+                                WHEN TRY_TO_DECIMAL(C.PERCENTCHANGEX) BETWEEN TRY_TO_DECIMAL(C.minwarningthreshold) AND TRY_TO_DECIMAL(C.maxwarningthreshold) THEN 'PASS'
+                                ELSE 'WARNING'
+                              END
+                            WHEN ((C.minwarningthreshold='NA' OR C.maxwarningthreshold='NA') AND C.minfailthreshold<>'NA' AND C.maxfailthreshold<>'NA') THEN
+                              CASE
+                                WHEN TRY_TO_DECIMAL(C.PERCENTCHANGEX) BETWEEN TRY_TO_DECIMAL(C.minfailthreshold) AND TRY_TO_DECIMAL(C.maxfailthreshold) THEN 'PASS'
+                                ELSE 'FAIL'
+                              END
+                            ELSE 'FAIL'
+                          END
+                        ELSE 'PASS'
+                      END
+                  END
+                WHEN C.thresholdtype = 'NUMBER' THEN
+                  CASE
+                    WHEN (
+                      (C.floorvalue > -1 AND C.ceilingvalue = -1 AND C.RESULT_NUM >= C.floorvalue) OR
+                      (C.ceilingvalue > -1 AND C.floorvalue = -1 AND C.RESULT_NUM <= C.ceilingvalue) OR
+                      (C.floorvalue = -1 AND C.ceilingvalue = -1) OR
+                      (C.floorvalue > -1 AND C.ceilingvalue > -1 AND C.RESULT_NUM BETWEEN C.floorvalue AND C.ceilingvalue)
+                    )
+                    THEN
+                      CASE
+                        WHEN (C.minwarningthreshold<>'NA' AND C.maxwarningthreshold<>'NA' AND C.minfailthreshold<>'NA' AND C.maxfailthreshold<>'NA') THEN
+                          CASE
+                            WHEN C.RESULT_NUM BETWEEN TRY_TO_DECIMAL(C.minwarningthreshold) AND TRY_TO_DECIMAL(C.maxwarningthreshold) THEN 'PASS'
+                            WHEN (C.RESULT_NUM < TRY_TO_DECIMAL(C.minwarningthreshold) AND C.RESULT_NUM >= TRY_TO_DECIMAL(C.minfailthreshold))
+                              OR (C.RESULT_NUM > TRY_TO_DECIMAL(C.maxwarningthreshold) AND C.RESULT_NUM <= TRY_TO_DECIMAL(C.maxfailthreshold)) THEN 'WARNING'
+                            WHEN C.RESULT_NUM < TRY_TO_DECIMAL(C.minfailthreshold)
+                              OR C.RESULT_NUM > TRY_TO_DECIMAL(C.maxfailthreshold) THEN 'FAIL'
+                            ELSE 'FAIL'
+                          END
+                        WHEN (C.minwarningthreshold<>'NA' AND C.maxwarningthreshold<>'NA' AND (C.minfailthreshold='NA' OR C.maxfailthreshold='NA')) THEN
+                          CASE
+                            WHEN C.RESULT_NUM BETWEEN TRY_TO_DECIMAL(C.minwarningthreshold) AND TRY_TO_DECIMAL(C.maxwarningthreshold) THEN 'PASS'
+                            ELSE 'WARNING'
+                          END
+                        WHEN ((C.minwarningthreshold='NA' OR C.maxwarningthreshold='NA') AND C.minfailthreshold<>'NA' AND C.maxfailthreshold<>'NA') THEN
+                          CASE
+                            WHEN C.RESULT_NUM BETWEEN TRY_TO_DECIMAL(C.minfailthreshold) AND TRY_TO_DECIMAL(C.maxfailthreshold) THEN 'PASS'
+                            ELSE 'FAIL'
+                          END
+                        ELSE 'FAIL'
+                      END
+                    ELSE 'PASS'
+                  END
+                ELSE 'FAIL'
+              END
+          END
+        ELSE
+          CASE
+            WHEN REGEXP_INSTR(C.RESULTX,'[A-Z]',1,1,0,'i') = 0 AND COALESCE(C.METRICNAME,'') <> 'ERROR' THEN 'PASS'
+            ELSE 'FAIL'
+          END
+      END AS TESTSTATUSX
+    FROM TMP_DSE_METRIC_CALC C;
+
+    UPDATE TMP_DSE_STATUS_LONG
+       SET TESTSTATUSX = 'WARNING'
+     WHERE IS_DELETED = 0
+       AND (SELECT FREQUENCYCHECK FROM TMP_DSE_PLAN_V) > 0
+       AND FREQUENCYCOUNTER > (SELECT FREQUENCYCHECK FROM TMP_DSE_PLAN_V)
+       AND FREQUENCYCOUNTER > 0;
+
+    CREATE OR REPLACE TEMP TABLE TMP_DSE_METRICS_WIDE AS
+    SELECT
+      DSID, JOBNAME, EXECUTIONSTEP, ENVIRONMENT_ID, TESTCASEDESCRIPTION,
+      METRICID, METRICNAME,
+      MAX(IFF(IDX=1, RESULTX, NULL)) AS RESULT1,
+      MAX(IFF(IDX=1, PRIORX, NULL)) AS PRIORRESULT1,
+      MAX(IFF(IDX=1, DELTAX, NULL)) AS DELTA1,
+      MAX(IFF(IDX=1, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE1,
+      MAX(IFF(IDX=1, TESTSTATUSX, NULL)) AS TESTSTATUS1,
+      MAX(IFF(IDX=2, RESULTX, NULL)) AS RESULT2,
+      MAX(IFF(IDX=2, PRIORX, NULL)) AS PRIORRESULT2,
+      MAX(IFF(IDX=2, DELTAX, NULL)) AS DELTA2,
+      MAX(IFF(IDX=2, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE2,
+      MAX(IFF(IDX=2, TESTSTATUSX, NULL)) AS TESTSTATUS2,
+      MAX(IFF(IDX=3, RESULTX, NULL)) AS RESULT3,
+      MAX(IFF(IDX=3, PRIORX, NULL)) AS PRIORRESULT3,
+      MAX(IFF(IDX=3, DELTAX, NULL)) AS DELTA3,
+      MAX(IFF(IDX=3, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE3,
+      MAX(IFF(IDX=3, TESTSTATUSX, NULL)) AS TESTSTATUS3,
+      MAX(IFF(IDX=4, RESULTX, NULL)) AS RESULT4,
+      MAX(IFF(IDX=4, PRIORX, NULL)) AS PRIORRESULT4,
+      MAX(IFF(IDX=4, DELTAX, NULL)) AS DELTA4,
+      MAX(IFF(IDX=4, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE4,
+      MAX(IFF(IDX=4, TESTSTATUSX, NULL)) AS TESTSTATUS4,
+      MAX(IFF(IDX=5, RESULTX, NULL)) AS RESULT5,
+      MAX(IFF(IDX=5, PRIORX, NULL)) AS PRIORRESULT5,
+      MAX(IFF(IDX=5, DELTAX, NULL)) AS DELTA5,
+      MAX(IFF(IDX=5, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE5,
+      MAX(IFF(IDX=5, TESTSTATUSX, NULL)) AS TESTSTATUS5,
+      MAX(IFF(IDX=6, RESULTX, NULL)) AS RESULT6,
+      MAX(IFF(IDX=6, PRIORX, NULL)) AS PRIORRESULT6,
+      MAX(IFF(IDX=6, DELTAX, NULL)) AS DELTA6,
+      MAX(IFF(IDX=6, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE6,
+      MAX(IFF(IDX=6, TESTSTATUSX, NULL)) AS TESTSTATUS6,
+      MAX(IFF(IDX=7, RESULTX, NULL)) AS RESULT7,
+      MAX(IFF(IDX=7, PRIORX, NULL)) AS PRIORRESULT7,
+      MAX(IFF(IDX=7, DELTAX, NULL)) AS DELTA7,
+      MAX(IFF(IDX=7, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE7,
+      MAX(IFF(IDX=7, TESTSTATUSX, NULL)) AS TESTSTATUS7,
+      MAX(IFF(IDX=8, RESULTX, NULL)) AS RESULT8,
+      MAX(IFF(IDX=8, PRIORX, NULL)) AS PRIORRESULT8,
+      MAX(IFF(IDX=8, DELTAX, NULL)) AS DELTA8,
+      MAX(IFF(IDX=8, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE8,
+      MAX(IFF(IDX=8, TESTSTATUSX, NULL)) AS TESTSTATUS8,
+      MAX(IFF(IDX=9, RESULTX, NULL)) AS RESULT9,
+      MAX(IFF(IDX=9, PRIORX, NULL)) AS PRIORRESULT9,
+      MAX(IFF(IDX=9, DELTAX, NULL)) AS DELTA9,
+      MAX(IFF(IDX=9, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE9,
+      MAX(IFF(IDX=9, TESTSTATUSX, NULL)) AS TESTSTATUS9,
+      MAX(IFF(IDX=10, RESULTX, NULL)) AS RESULT10,
+      MAX(IFF(IDX=10, PRIORX, NULL)) AS PRIORRESULT10,
+      MAX(IFF(IDX=10, DELTAX, NULL)) AS DELTA10,
+      MAX(IFF(IDX=10, PERCENTCHANGEX, NULL)) AS PERCENTCHANGE10,
+      MAX(IFF(IDX=10, TESTSTATUSX, NULL)) AS TESTSTATUS10,
+      MAX(FREQUENCYCOUNTER) AS FREQUENCYCOUNTER,
+      MAX(IS_DELETED) AS IS_DELETED
+    FROM TMP_DSE_STATUS_LONG
+    GROUP BY DSID, JOBNAME, EXECUTIONSTEP, ENVIRONMENT_ID, TESTCASEDESCRIPTION, METRICID, METRICNAME;
+
+    INSERT INTO TMP_DSE_METRICS_WIDE
+    SELECT
+      DSID, JOBNAME, EXECUTIONSTEP, ENVIRONMENT_ID, TESTCASEDESCRIPTION,
+      0::NUMBER AS METRICID,
+      TESTCASEDESCRIPTION AS METRICNAME,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      NULL,NULL,NULL,NULL,NULL,
+      0::NUMBER AS FREQUENCYCOUNTER,
+      0::NUMBER AS IS_DELETED
+    FROM TMP_DSE_PLAN_V
+    WHERE TESTTYPE='MULTI DATAPOINT';
+    '''
+    session.sql(eval_sql).collect()
+    return "OK"
+$$;
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PERSIST_PY(
+  DSID VARCHAR,
+  RUNID VARCHAR,
+  ENVIRONMENT_ID NUMBER
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+
+def run(session: Session, DSID: str, RUNID: str, ENVIRONMENT_ID: int) -> str:
+    session.sql(
+        "UPDATE DATASENTINEL_COMPACT.DSE_TESTRESULTS "
+        "SET ACTV_IND='N' "
+        f"WHERE DSID='{DSID}' AND ENVIRONMENT_ID={ENVIRONMENT_ID} AND ACTV_IND='Y'"
+    ).collect()
+
+    session.sql(f'''
+        INSERT INTO DATASENTINEL_COMPACT.DSE_TESTRESULTS
+        (DSID,JOBNAME,EXECUTIONSTEP,ENVIRONMENT_ID,TESTCASEDESCRIPTION,METRICRESULTS,FREQUENCYCOUNTER,ACTV_IND,RUNID,RUNDATE,INSERTTIMESTAMP,RPT_MO_KEY,TOTALRUNTIME,SQLRUNTIME)
+        SELECT
+          '{DSID}'::NUMBER AS DSID,
+          p.JOBNAME,
+          p.EXECUTIONSTEP,
+          {ENVIRONMENT_ID}::NUMBER AS ENVIRONMENT_ID,
+          p.TESTCASEDESCRIPTION,
+          (
+            SELECT ARRAY_AGG(OBJECT_CONSTRUCT_KEEP_NULL(
+              'METRICID', METRICID,
+              'METRICNAME', METRICNAME,
+              'RESULT1', RESULT1,'PRIORRESULT1',PRIORRESULT1,'DELTA1',DELTA1,'PERCENTCHANGE1',PERCENTCHANGE1,'TESTSTATUS1',TESTSTATUS1,
+              'RESULT2', RESULT2,'PRIORRESULT2',PRIORRESULT2,'DELTA2',DELTA2,'PERCENTCHANGE2',PERCENTCHANGE2,'TESTSTATUS2',TESTSTATUS2,
+              'RESULT3', RESULT3,'PRIORRESULT3',PRIORRESULT3,'DELTA3',DELTA3,'PERCENTCHANGE3',PERCENTCHANGE3,'TESTSTATUS3',TESTSTATUS3,
+              'RESULT4', RESULT4,'PRIORRESULT4',PRIORRESULT4,'DELTA4',DELTA4,'PERCENTCHANGE4',PERCENTCHANGE4,'TESTSTATUS4',TESTSTATUS4,
+              'RESULT5', RESULT5,'PRIORRESULT5',PRIORRESULT5,'DELTA5',DELTA5,'PERCENTCHANGE5',PERCENTCHANGE5,'TESTSTATUS5',TESTSTATUS5,
+              'RESULT6', RESULT6,'PRIORRESULT6',PRIORRESULT6,'DELTA6',DELTA6,'PERCENTCHANGE6',PERCENTCHANGE6,'TESTSTATUS6',TESTSTATUS6,
+              'RESULT7', RESULT7,'PRIORRESULT7',PRIORRESULT7,'DELTA7',DELTA7,'PERCENTCHANGE7',PERCENTCHANGE7,'TESTSTATUS7',TESTSTATUS7,
+              'RESULT8', RESULT8,'PRIORRESULT8',PRIORRESULT8,'DELTA8',DELTA8,'PERCENTCHANGE8',PERCENTCHANGE8,'TESTSTATUS8',TESTSTATUS8,
+              'RESULT9', RESULT9,'PRIORRESULT9',PRIORRESULT9,'DELTA9',DELTA9,'PERCENTCHANGE9',PERCENTCHANGE9,'TESTSTATUS9',TESTSTATUS9,
+              'RESULT10', RESULT10,'PRIORRESULT10',PRIORRESULT10,'DELTA10',DELTA10,'PERCENTCHANGE10',PERCENTCHANGE10,'TESTSTATUS10',TESTSTATUS10
+            ))
+            FROM TMP_DSE_METRICS_WIDE
+            WHERE IS_DELETED = 0
+          ) AS METRICRESULTS,
+          COALESCE((SELECT MAX(FREQUENCYCOUNTER) FROM TMP_DSE_METRICS_WIDE WHERE IS_DELETED=0),0) AS FREQUENCYCOUNTER,
+          'Y' AS ACTV_IND,
+          TO_NUMBER('{RUNID}') AS RUNID,
+          SYSDATE() AS RUNDATE,
+          SYSDATE() AS INSERTTIMESTAMP,
+          NULL,NULL,NULL
+        FROM TMP_DSE_PLAN p;
+    ''').collect()
+
+    testtype = session.sql("SELECT TESTTYPE FROM TMP_DSE_PLAN").collect()[0][0]
+
+    if testtype in ("SINGLE DATAPOINT","MINUS QUERY","GETPROFILEKEY"):
+        final = session.sql(
+            "SELECT COALESCE(MAX(TESTSTATUS1),'FAIL') FROM TMP_DSE_METRICS_WIDE WHERE IS_DELETED=0"
+        ).collect()[0][0]
+    else:
+        final = session.sql(
+            "SELECT CASE "
+            "  WHEN SUM(IFF('FAIL' IN (TESTSTATUS1,TESTSTATUS2,TESTSTATUS3,TESTSTATUS4,TESTSTATUS5,TESTSTATUS6,TESTSTATUS7,TESTSTATUS8,TESTSTATUS9,TESTSTATUS10),1,0)) > 0 THEN 'FAIL' "
+            "  WHEN SUM(IFF('WARNING' IN (TESTSTATUS1,TESTSTATUS2,TESTSTATUS3,TESTSTATUS4,TESTSTATUS5,TESTSTATUS6,TESTSTATUS7,TESTSTATUS8,TESTSTATUS9,TESTSTATUS10),1,0)) > 0 THEN 'WARNING' "
+            "  ELSE 'PASS' END "
+            "FROM TMP_DSE_METRICS_WIDE WHERE METRICID<>0 AND IS_DELETED=0"
+        ).collect()[0][0]
+
+    session.sql(
+        "UPDATE DATASENTINEL_COMPACT.DSE_TESTRESULTS "
+        f"SET TESTSTATUS='{final}' "
+        f"WHERE DSID='{DSID}' AND ENVIRONMENT_ID={ENVIRONMENT_ID} AND RUNID=TO_NUMBER('{RUNID}')"
+    ).collect()
+
+    rc = 1 if final == "FAIL" else (2 if final == "WARNING" else 0)
+    session.sql(f"CREATE OR REPLACE TEMP TABLE TMP_DSE_RETURN AS SELECT {rc}::NUMBER AS returncode").collect()
+    return "OK"
+$$;
+
+CREATE OR REPLACE PROCEDURE CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_ENGINE_MODULAR_PY(
+  DSID VARCHAR,
+  RUNID VARCHAR,
+  SRC_TMP VARCHAR,
+  TGT_TMP VARCHAR,
+  ENVIRONMENT_ID NUMBER
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER='run'
+EXECUTE AS CALLER
+AS
+$$
+from snowflake.snowpark import Session
+
+def run(session: Session, DSID: str, RUNID: str, SRC_TMP: str, TGT_TMP: str, ENVIRONMENT_ID: int) -> str:
+    session.sql(f"CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PLAN_GET_PY('{DSID}', {ENVIRONMENT_ID})").collect()
+    tgt = session.sql("SELECT UPPER(TARGETTABLE) FROM TMP_DSE_PLAN").collect()
+    if not tgt or tgt[0][0] != "DSE_TESTRESULTS":
+        session.sql("CREATE OR REPLACE TEMP TABLE TMP_DSE_RETURN AS SELECT 0::NUMBER AS returncode").collect()
+        return "0"
+
+    session.sql(f"CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PRIOR_LOAD_PY('{DSID}', {ENVIRONMENT_ID})").collect()
+    session.sql(f"CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_CURRENT_LOAD_PY('{DSID}', '{RUNID}', '{TGT_TMP}')").collect()
+    session.sql(f"CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_EVALUATE_PY('{DSID}', '{RUNID}', {ENVIRONMENT_ID})").collect()
+    session.sql(f"CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_PERSIST_PY('{DSID}', '{RUNID}', {ENVIRONMENT_ID})").collect()
+
+    rc = session.sql("SELECT returncode FROM TMP_DSE_RETURN").collect()[0][0]
+    return str(rc)
+$$;
+
+-- Usage:
+-- CALL CKF_PRD_STARS_DS_DB.DATASENTINEL_COMPACT.SP_DSE_ENGINE_MODULAR_PY(<DSID>, <RUNID>, <SRC_TMP>, <TGT_TMP>, <ENVIRONMENT_ID>);

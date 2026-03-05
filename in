@@ -123,6 +123,7 @@ def validate_form(product_warehouse, test_type:str, data:dict, selected_threshol
                 try:
                     col_names_list = col_names.split(',')
                     col_names_list = col_names_list[1:]
+                    col_count = len(col_names_list)   
                     col_names = ','.join(col_names_list)
                 except Exception as e:
                     st.error("Failed to extract columns")

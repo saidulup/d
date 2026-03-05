@@ -1092,7 +1092,8 @@ from datasentinel_compact.dse_threshold where thresholdId =:v_thresholdid;
 
 ---case 1 check if the result is numeric or an error value
 
-case when (result''||counter||'' IS NOT NULL AND hash(lower(result''||counter||''))=hash(Upper(result''||counter||'')))
+case when (result''||counter||'' IS NULL AND PriorResult''||counter||'' IS NOT NULL) then ''''PASS''''
+     else case when (result''||counter||'' IS NOT NULL AND hash(lower(result''||counter||''))=hash(Upper(result''||counter||'')))
 
 
 

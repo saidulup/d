@@ -1085,287 +1085,163 @@ from datasentinel_compact.dse_threshold where thresholdId =:v_thresholdid;
 
 
   Execute Immediate ''Update TEMP_DSE_DataProfile_MetricList DPM1
-
-						Set  DPM1.TESTSTATUS''||counter||'' = reslt.TESTSTATUS''||counter||''     
-
-						FROM      (SELECT DPM.DSID,DPM.METRICID,DPM.ENVIRONMENT_ID,
+    Set  DPM1.TESTSTATUS''||counter||'' = reslt.TESTSTATUS''||counter||''     
+    FROM      (SELECT DPM.DSID,DPM.METRICID,DPM.ENVIRONMENT_ID,
 
 ---case 1 check if the result is numeric or an error value
+case
+     -- ✅ existed in prior run but missing in current run → PASS (prevents FAIL/returncode=1)
+     when (Result''||counter||'' IS NULL AND PriorResult''||counter||'' IS NOT NULL) then ''''PASS''''
 
-case when (result''||counter||'' IS NULL AND PriorResult''||counter||'' IS NOT NULL) then ''''PASS''''
-     else case when (result''||counter||'' IS NOT NULL AND hash(lower(result''||counter||''))=hash(Upper(result''||counter||'')))
-
-
-
+     -- existing path: current result is numeric → run your threshold logic (UNCHANGED)
+     when (Result''||counter||'' IS NOT NULL AND hash(lower(Result''||counter||''))=hash(Upper(Result''||counter||'')))
      then
 
 ----case 2 check on thresholdtype  
-
-		
-
-                  CASE 
-
-                  	---BEGIN PERCENT BLOCK
-
-                    	WHEN ''''''||v_ThresholdType||'''''' =''''PERCENT'''' 
-
-                  THEN 
-
-                 ----Case 3: Check if Percentchange is numeric or exponential.. if it is exponential FAIL            
-
-                               CASE WHEN hash(lower(DPM.PercentChange''||counter||''))=hash(upper(DPM.PercentChange''||counter||''))
-
-                               THEN
-
-                 ---- case 4: Check if the result is btween floor and ceiling values                   
-
-                                                    case when ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' =-1 
-
-                                                    		  		AND Result''||counter||''::INTEGER >= ''||v_floorvalue||''::INTEGER)  -- floor value is not null and ceiling value is null and result>floor value
-
-                                                              OR  (''||v_ceilingvalue||'' >-1 AND ''||v_floorvalue||'' =-1
-
-                                                                    AND Result''||counter||''::INTEGER <= ''||v_ceilingvalue||''::INTEGER) -- ceiling value is not null and floor value is null and result<= ceiling
-
-                                                              OR  (''||v_floorvalue||'' =-1 AND ''||v_ceilingvalue||'' =-1) --- both ceiling and floor values are null
-
-                                                              OR ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' >-1) 
-
-                                                                    AND (COALESCE(Result''||counter||'',0)::INTEGER between ''||v_floorvalue||''::INTEGER and ''||v_ceilingvalue||''::INTEGER))) 
-
-                                                                    -- both ceiling and floor are not null and result is between floor and ceiling
-
-                                                          THEN 
-
-                                                ----CAse 5 process for each combination of thresholds
-
-                                                
-
-                                                     --- when all thresholds are populated
-
-                                                             
-
-                                                          CASE WHEN (''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''' 
-
-                                                        			AND ''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA'''')
-
-                                                                    then 
-
-                                                                        ---case 6: check percent change value between warning and fail thresholds
-
-                                                                        ----        percent change between warning thresholds then pass
-
-                                                                         CASE WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
-
-                                   											   and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                         	  
-
-                                                                        ------ Percent Change is between min and max warning and fail thresholds          
-
-                                                                              WHEN ((PercentChange''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''' 
-
-                                                                                    and PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||'''''')
-
-                                                                                  OR (PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxwarningthreshold||'''''' 
-
-                                                                                     and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''))  then ''''WARNING''''        
-
-                                                                          -- Percent Chnge is greater than max fail threshold or less than min fail threhsold    
-
-                                                                              WHEN (PercentChange''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
-
-                                                                                  OR PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''')  then ''''FAIL'''' 
-
-                                                                         END -- end case 6     
-
-                                                        -- when only warning thresholds are populated
-
-                                                                   WHEN ((''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''')
-
-                                                                        and (''''''||v_minfailthreshold||''''''=''''NA'''' OR ''''''||v_maxfailthreshold||'''''' =''''NA''''))
-
-                                                                   then 
-
-                                 -----Case 7: Percent change less than min and greater than max warning thresholds          
-
-                                                                          	 case WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
-
-                                   											       and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                                   when ((PercentChange''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''') 
-
-                                                                          	 			OR (PercentChange''||counter||''::decimal(19,4) >''''''||v_maxwarningthreshold||'''''')) then ''''WARNING''''
-
-                                                                          	 END --- end case 7
-
-                                                           -- min and max warning thresholds are null and fail thresholds are populated
-
-                                                          WHEN ((''''''||v_minwarningthreshold||''''''=''''NA'''' OR ''''''||v_maxwarningthreshold||'''''' =''''NA'''')
-
-                                                                        and (''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA''''))
-
-                                                                   then 
-
-                                    --- case 8: Percent change less than min and greater than max fail thresholds                                       
-
-                                                                      case WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||''''''::decimal(19,4)
-
-                                   											       and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                         when (PercentChange''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
-
-                                                                         	          OR PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''') then ''''FAIL''''
-
-                                                                         	 END  --end case 8
-
-                                                                 END -- End case 5
-
-                                 when (Result''||counter||''::integer < ''||v_floorvalue||''::INTEGER 
-
-                                                          OR Result''||counter||''::integer > ''||v_ceilingvalue||'') then ''''PASS''''
-
-                                 END --- End Case 4
-
-                                ELSE ''''FAIL''''
-
-                         	  END   --- END Case 3 
-
-                        
-
-                        --- END PERCENT TYPE 
-
-
-
-                                                                                             
-
-                       ---- BEGIN NUMBER TYPE
-
-                       WHEN ''''''||v_ThresholdType||'''''' =''''NUMBER''''  
-
-                       THEN                                                                                                                                                                                                                  ---- case 4: Check if the result is btween floor and ceiling values                   
-
-                                                    case when ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' =-1 
-
-                                                    		  		AND Result''||counter||''::INTEGER >= ''||v_floorvalue||''::INTEGER)  -- floor value is not null and ceiling value is null and result>floor value
-
-                                                              OR  (''||v_ceilingvalue||'' >-1 AND ''||v_floorvalue||'' =-1
-
-                                                                    AND Result''||counter||''::INTEGER <= ''||v_ceilingvalue||''::INTEGER) -- ceiling value is not null and floor value is null and result<= ceiling
-
-                                                              OR  (''||v_floorvalue||'' =-1 AND ''||v_ceilingvalue||'' =-1) --- both ceiling and floor values are null
-
-                                                              OR ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' >-1) 
-
-                                                                    AND (COALESCE(Result''||counter||'',0)::INTEGER between ''||v_floorvalue||''::INTEGER and ''||v_ceilingvalue||''::INTEGER))) 
-
-                                                                    -- both ceiling and floor are not null and result is between floor and ceiling
-
-                                                          THEN 
-
-                                                ----CAse 5 process for each combination of thresholds
-
-                                                
-
-                                                     --- when all thresholds are populated
-
-                                                             
-
-                                                          CASE WHEN (''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''' 
-
-                                                        			AND ''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA'''')
-
-                                                                    then 
-
-                                                                        ---case 6: check result value between warning and fail thresholds
-
-                                                                        ----        result between warning thresholds then pass
-
-                                                                         CASE WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
-
-                                   											   and Result''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                         	  
-
-                                                                        ------ Result is between min and max warning and fail thresholds          
-
-                                                                              WHEN ((Result''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''' 
-
-                                                                                    and Result''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||'''''')
-
-                                                                                  OR (Result''||counter||''::decimal(19,4) > ''''''||v_maxwarningthreshold||''''''
-
-                                                                                     and Result''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''))  then ''''WARNING''''        
-
-                                                                          -- Result is greater than max fail threshold or less than min fail threhsold    
-
-                                                                              WHEN (Result''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
-
-                                                                                  OR Result''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''')  then ''''FAIL'''' 
-
-                                                                         END -- end case 6     
-
-                                                        -- when only warning thresholds are populated
-
-                                                                   WHEN ((''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''')
-
-                                                                        and (''''''||v_minfailthreshold||''''''=''''NA'''' OR ''''''||v_maxfailthreshold||'''''' =''''NA''''))
-
-                                                                   then 
-
-                                 -----Case 7: Result less than min and greater than max warning thresholds          
-
-                                                                          	 case WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
-
-                                   											       and Result''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                                   when ((Result''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''') 
-
-                                                                          	 			OR (Result''||counter||''::decimal(19,4) >''''''||v_maxwarningthreshold||'''''')) then ''''WARNING''''
-
-                                                                          	 END --- end case 7
-
-                                                           -- min and max warning thresholds are null and fail thresholds are populated
-
-                                                          WHEN ((''''''||v_minwarningthreshold||''''''=''''NA'''' OR ''''''||v_maxwarningthreshold||'''''' =''''NA'''')
-
-                                                                        and (''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA''''))
-
-                                                                   then 
-
-                                    --- case 8: Result less than min and greater than max fail thresholds                                       
-
-                                                                      case WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||''''''::decimal(19,4)
-
-                                   											       and Result''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''::decimal(19,4) then ''''PASS''''
-
-                                                                         when (Result''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
-
-                                                                         	          OR Result''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''') then ''''FAIL''''
-
-                                                                         	 END  --end case 8
-
-                                                                 END -- End case 5
-
-                                 when (Result''||counter||''::integer < ''||v_floorvalue||''::INTEGER 
-
-                                                          OR Result''||counter||''::integer > ''||v_ceilingvalue||'') then ''''PASS''''
-
-                                 END --- End Case 4
-
-                  ELSE ''''FAIL'''' END -- END CASE 2
-
-          ELSE ''''FAIL'''' END --- END CASE 1         
-
-          as TESTSTATUS''||counter||''
-
-                                                                                      FROM TEMP_DSE_DataProfile_MetricList DPM 
-
-                                                                                      WHERE DPM.DSID = ''||DSID||'' and DPM.ENVIRONMENT_ID = ''||v_ENVIRONMENT_ID||''
-
-           )reslt
-
-            where DPM1.DSID=reslt.DSID and DPM1.METRICID=reslt.METRICID and DPM1.ENVIRONMENT_ID= reslt.ENVIRONMENT_ID '';
+CASE 
+
+    ---BEGIN PERCENT BLOCK
+    WHEN ''''''||v_ThresholdType||'''''' =''''PERCENT'''' 
+    THEN 
+
+        ----Case 3: Check if Percentchange is numeric or exponential.. if it is exponential FAIL            
+        CASE WHEN hash(lower(DPM.PercentChange''||counter||''))=hash(upper(DPM.PercentChange''||counter||''))
+        THEN
+
+            ---- case 4: Check if the result is btween floor and ceiling values                   
+            case when ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' =-1 
+                        AND Result''||counter||''::INTEGER >= ''||v_floorvalue||''::INTEGER)
+                    OR  (''||v_ceilingvalue||'' >-1 AND ''||v_floorvalue||'' =-1
+                        AND Result''||counter||''::INTEGER <= ''||v_ceilingvalue||''::INTEGER)
+                    OR  (''||v_floorvalue||'' =-1 AND ''||v_ceilingvalue||'' =-1)
+                    OR ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' >-1) 
+                        AND (COALESCE(Result''||counter||'',0)::INTEGER between ''||v_floorvalue||''::INTEGER and ''||v_ceilingvalue||''::INTEGER))) 
+            THEN 
+
+                ----CAse 5 process for each combination of thresholds
+                CASE 
+                    --- when all thresholds are populated
+                    WHEN (''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''' 
+                          AND ''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA'''')
+                    then 
+                        ---case 6: check percent change value between warning and fail thresholds
+                        CASE 
+                            WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
+                             and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
+                            WHEN ((PercentChange''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''' 
+                                   and PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||'''''')
+                               OR (PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxwarningthreshold||'''''' 
+                                   and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''))  then ''''WARNING''''
+                            WHEN (PercentChange''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
+                               OR PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''')  then ''''FAIL''''
+                        END
+
+                    -- when only warning thresholds are populated
+                    WHEN ((''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''')
+                          and (''''''||v_minfailthreshold||''''''=''''NA'''' OR ''''''||v_maxfailthreshold||'''''' =''''NA''''))
+                    then 
+                        case 
+                            WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
+                             and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
+                            when (PercentChange''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''') 
+                              OR (PercentChange''||counter||''::decimal(19,4) >''''''||v_maxwarningthreshold||'''''' ) then ''''WARNING''''
+                        END
+
+                    -- min and max warning thresholds are null and fail thresholds are populated
+                    WHEN ((''''''||v_minwarningthreshold||''''''=''''NA'''' OR ''''''||v_maxwarningthreshold||'''''' =''''NA'''')
+                          and (''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA''''))
+                    then 
+                        case 
+                            WHEN PercentChange''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||''''''::decimal(19,4)
+                             and PercentChange''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''::decimal(19,4) then ''''PASS''''
+                            when (PercentChange''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
+                               OR PercentChange''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''') then ''''FAIL''''
+                        END
+
+                END
+
+            when (Result''||counter||''::integer < ''||v_floorvalue||''::INTEGER 
+               OR Result''||counter||''::integer > ''||v_ceilingvalue||'') then ''''PASS''''
+            END
+
+        ELSE ''''FAIL''''
+
+        END   --- END Case 3 
+
+    --- END PERCENT TYPE 
+
+    ---- BEGIN NUMBER TYPE
+    WHEN ''''''||v_ThresholdType||'''''' =''''NUMBER''''  
+    THEN
+        ---- case 4: Check if the result is btween floor and ceiling values                   
+        case when ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' =-1 
+                    AND Result''||counter||''::INTEGER >= ''||v_floorvalue||''::INTEGER)
+                OR  (''||v_ceilingvalue||'' >-1 AND ''||v_floorvalue||'' =-1
+                    AND Result''||counter||''::INTEGER <= ''||v_ceilingvalue||''::INTEGER)
+                OR  (''||v_floorvalue||'' =-1 AND ''||v_ceilingvalue||'' =-1)
+                OR ((''||v_floorvalue||'' >-1 AND ''||v_ceilingvalue||'' >-1) 
+                    AND (COALESCE(Result''||counter||'',0)::INTEGER between ''||v_floorvalue||''::INTEGER and ''||v_ceilingvalue||''::INTEGER))) 
+        THEN 
+
+            ----CAse 5 process for each combination of thresholds
+            CASE 
+                --- when all thresholds are populated
+                WHEN (''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''' 
+                      AND ''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA'''')
+                then 
+                    ---case 6: check result value between warning and fail thresholds
+                    CASE 
+                        WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
+                         and Result''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
+                        WHEN ((Result''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''' 
+                               and Result''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||'''''')
+                           OR (Result''||counter||''::decimal(19,4) > ''''''||v_maxwarningthreshold||''''''
+                               and Result''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''))  then ''''WARNING''''
+                        WHEN (Result''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
+                           OR Result''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''')  then ''''FAIL''''
+                    END
+
+                -- when only warning thresholds are populated
+                WHEN ((''''''||v_minwarningthreshold||''''''<>''''NA'''' AND ''''''||v_maxwarningthreshold||'''''' <>''''NA'''')
+                      and (''''''||v_minfailthreshold||''''''=''''NA'''' OR ''''''||v_maxfailthreshold||'''''' =''''NA''''))
+                then 
+                    case 
+                        WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minwarningthreshold||''''''::decimal(19,4)
+                         and Result''||counter||''::decimal(19,4) <= ''''''||v_maxwarningthreshold||''''''::decimal(19,4) then ''''PASS''''
+                        when (Result''||counter||''::decimal(19,4) < ''''''||v_minwarningthreshold||'''''') 
+                          OR (Result''||counter||''::decimal(19,4) >''''''||v_maxwarningthreshold||'''''' ) then ''''WARNING''''
+                    END
+
+                -- min and max warning thresholds are null and fail thresholds are populated
+                WHEN ((''''''||v_minwarningthreshold||''''''=''''NA'''' OR ''''''||v_maxwarningthreshold||'''''' =''''NA'''')
+                      and (''''''||v_minfailthreshold||''''''<>''''NA'''' AND ''''''||v_maxfailthreshold||'''''' <>''''NA''''))
+                then 
+                    case 
+                        WHEN Result''||counter||''::decimal(19,4) >= ''''''||v_minfailthreshold||''''''::decimal(19,4)
+                         and Result''||counter||''::decimal(19,4) <= ''''''||v_maxfailthreshold||''''''::decimal(19,4) then ''''PASS''''
+                        when (Result''||counter||''::decimal(19,4) < ''''''||v_minfailthreshold||''''''
+                           OR Result''||counter||''::decimal(19,4) > ''''''||v_maxfailthreshold||'''''') then ''''FAIL''''
+                    END
+
+            END
+
+        when (Result''||counter||''::integer < ''||v_floorvalue||''::INTEGER 
+           OR Result''||counter||''::integer > ''||v_ceilingvalue||'') then ''''PASS''''
+        END
+
+    ELSE ''''FAIL'''' 
+END -- END CASE 2
+
+     else ''''FAIL''''
+end --- END CASE 1         
+
+as TESTSTATUS''||counter||''
+
+FROM TEMP_DSE_DataProfile_MetricList DPM 
+WHERE DPM.DSID = ''||DSID||'' and DPM.ENVIRONMENT_ID = ''||v_ENVIRONMENT_ID||''
+
+)reslt
+where DPM1.DSID=reslt.DSID and DPM1.METRICID=reslt.METRICID and DPM1.ENVIRONMENT_ID= reslt.ENVIRONMENT_ID '';
 
 END IF;
 

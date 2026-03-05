@@ -1,14 +1,922 @@
-{
-  "_id": {
-    "$oid": "6936f3c0bdab98b8f57bd423"
-  },
-  "name": "saidulu",
-  "email_id": "saidulu.pagidimarry5@optum.com",
-  "access_role": "Org Admin",
-  "assigned_projects": {},
-  "preferences": {
-    "theme": "light"
-  },
-  "created_time": "2025-09-27T10:17:20.391008+00:00",
-  "updated_time": "2025-09-27T10:17:20.391008+00:00"
-}
+
+
+import time
+import random
+import pandas as pd
+import streamlit as st
+from loguru import logger
+from typing import Literal
+from streamlit import session_state as sst
+
+from src.pages.test_design.db import save_single_test, save_thresholds, generate_dsid
+from src.pages.test_design.ml import extract_result_columns
+
+
+
+from src.pages.data_utils import get_test_plan
+
+
+def add_new_threshold(
+        kind:Literal['new', 'edit'] = 'new',
+        test_type:Literal['SINGLE DATAPOINT', 'MULTI DATAPOINT', 'MINUS QUERY']='SINGLE DATAPOINT'
+    ):
+    """insert an empty record into threshold dataframe"""
+
+
+
+    if kind == 'new':
+        df_state = 'new_test_thresholds_df'
+        df_key_state = 'new_test_thresholds_df_key'
+        edited_df_state = 'edited_new_test_threshold_df'
+    else:
+        df_state = 'edit_test_thresholds_df'
+        df_key_state = 'edit_test_thresholds_df_key'
+        edited_df_state = 'edited_edit_test_threshold_df'
+
+    # Get the current edited dataframe from session state
+    edited_df = sst[edited_df_state]
+
+    # If single datapoint or minus query cant have more than 1 record so dont work
+    # If multi datapoint work
+    if test_type in {'SINGLE DATAPOINT', 'MINUS QUERY'} and edited_df.shape[0] >=1:
+        logger.warning(f"{test_type} can't have more than 1 test")
+        return
+
+
+
+    # add a new row to the edited dataframe
+    new_row = {
+        '': False,  # Checkbox column
+        'ORDER': None,
+        'THRESHOLDTYPE': None,  # Type of threshold (e.g., NUMBER, PERCENT)
+        'MINWARNINGTHRESHOLD': None,  # Minimum warning threshold
+        'MAXWARNINGTHRESHOLD': None,  # Maximum warning threshold
+        'MINFAILTHRESHOLD': None,  # Minimum fail threshold
+        'MAXFAILTHRESHOLD': None,  # Maximum fail threshold
+        'FLOORVALUE': None,  # Floor value for the threshold
+        'CEILINGVALUE': None,  # Ceiling value for the threshold
+    }
+
+    edited_df = pd.concat([edited_df, pd.DataFrame([new_row])], ignore_index=True)
+
+    # Update the session state with the new dataframe
+    # sst['edited_new_test_threshold_df'] = edited_df
+
+    sst[df_key_state] = f"{kind}_test_thresholds_df-{random.randrange(0, 1000)}"
+    sst[df_state] = edited_df
+    logger.info('New threshold added to the edited dataframe')
+
+
+def parse_threshold_ids(threshold_ids: str | None) -> list[int]:
+    """Convert comma-separated string of threshold ids into a list of integers"""
+    if threshold_ids is None:
+        return []
+    threshold_ids = str(threshold_ids).strip().split(',')
+    threshold_ids = [i.strip() for i in threshold_ids if i.strip().isdigit()]
+    return [int(i) for i in threshold_ids]
+
+
+
+def validate_form(product_warehouse, test_type:str, data:dict, selected_thresholds:pd.DataFrame):
+    """Validate form data, thresholds, save thresholds, fetch result cols"""
+    # Mandatory columns : Non nullable columns
+    mandatory_cols = [
+        'TESTTYPE', 'TESTCASEDESCRIPTION', 'TESTCATEGORY', 'TARGETTESTSCRIPT',
+        'DS_COVERAGE_OBJECT', 'EXECUTIONSTEP', 'ENABLEDFLAG', 'CRITICALITY',
+    ]
+    # Validate mandatory columns
+    for col in mandatory_cols:
+        if data[col] is None or data[col] == '':
+            st.warning(f"{col} cannot be empty")
+            return False, None
+
+    # Make on field in threshold df is null
+    # selected_thresholds = sst['edited_edit_test_threshold_df']
+    selected_thresholds = selected_thresholds[selected_thresholds[''] == True]
+    if selected_thresholds['THRESHOLDTYPE'].isnull().values.any():
+        st.warning('Threshold type cannot be empty')
+        return False, None
+
+    # Test count validation
+    # Single, Minus should contain exactly 1 non empty test
+    if test_type in {'SINGLE DATAPOINT', 'MINUS QUERY'} and selected_thresholds.shape[0] != 1:
+        st.error(f"{test_type} should have exactly 1 threshold")
+        return False, None
+
+    with st.spinner('Extracting Result Set Columns using LLMs ...'):
+        # Extract column names from the target test script
+        if test_type == 'MINUS QUERY':
+            col_count, col_names = 1, 'Mismatch_Count'
+        else:
+            col_count, col_names = extract_result_columns(data['TARGETTESTSCRIPT'])
+            logger.info(f"{col_count},{col_names}")
+            if col_count == 0:
+                st.error(
+                    "✨ AI Validation Failure: Unable to extract columns from the target test script. Please check the SQL syntax.")
+                return False, None
+
+            if test_type == 'MULTI DATAPOINT':
+                if col_count == 1:
+                    st.error("Multi Datapoint must have at least 2 columns")
+                    return False, None
+
+                try:
+                    col_names_list = col_names.split(',')
+                    col_names_list = col_names_list[1:]
+                    col_names = ','.join(col_names_list)
+                except Exception as e:
+                    st.error("Failed to extract columns")
+                    return False, None
+            else:
+                if col_count > 1:
+                    st.error("Single Datapoint must have one column")
+                    return False, None
+
+        data['RESULTSETCOLS'] = col_count
+        data['RESULTSETCOLNAME'] = col_names
+
+    # Multi should have at least one test
+    if test_type == 'MULTI DATAPOINT' and selected_thresholds.shape[0] != data['RESULTSETCOLS']:
+        st.error(f"{test_type} should have same no of thresholds as column count : {data['RESULTSETCOLS']}")
+        return False, None
+
+
+    with st.spinner('Saving thresholds ...'):
+        if selected_thresholds.empty:
+            data['THRESHOLDID'] = ''
+            new_ids = []
+        else:
+            res = save_thresholds(selected_thresholds, product_warehouse)
+            if res['status'] != 'Success':
+                st.error(f"Failed to save thresholds: {res['error']}")
+                st.stop()
+            else:
+                st.success('Thresholds saved successfully')
+                # Add the ids to the threshold_ids list
+                # existing_ids = res['existing_ids']
+                new_ids = res['newly_added_ids']
+                ordered_ids = res['ordered_ids']
+
+            # Convert threshold ids into a comma-separated string
+            data['THRESHOLDID'] = ','.join([str(thid) for thid in ordered_ids])
+
+        return True, new_ids
+
+
+@st.dialog(title='Add New Test', width='large')
+def add_new_test_dialog(product_objects, product_warehouse, job_id, job_name, test_categories):
+    """Dialog to add a new test to the testplan table"""
+    # st.markdown("### Add New Test")
+    st.markdown("Fill in the details for the new test below :red[✨ AI]")
+
+
+    # Test Category, Test Desc, Test Type
+    with st.container(
+        horizontal=True,
+        horizontal_alignment='distribute',
+        vertical_alignment='center',
+    ):
+        test_category = st.selectbox(
+            label='Test Category :red[*]',
+            options=test_categories,                help='Category of the test for easier classification',
+            key='new_test_category'
+        )
+
+        test_description = st.text_input(
+            label='Test Case Description :red[*]',
+            help='Description of the test case and its objective',
+            key='new_test_description',
+        )
+
+        test_type = st.selectbox(
+            label='Test Type :red[*]',
+            options=['SINGLE DATAPOINT', 'MULTI DATAPOINT', 'MINUS QUERY'],
+            help='Type of test to be performed',
+            key='new_test_type',
+        )
+
+
+    # Sql inputs
+    # only show source pre test if MINUS QUERY else empty ""
+    if test_type != 'MINUS QUERY':
+        col1 = None
+        col2 = st.container()
+    else:
+        col1, col2 = st.columns([1, 1])
+
+    # Source scripts
+
+    source_pre_sql = None
+    source_test_script = None
+    if col1 is not None:
+        with col1:
+
+            source_pre_sql = st.text_input(
+                label='Source Pre-SQL',
+                help='Pre-SQL script for the source table, if required',
+                key='new_source_pre_sql',
+                placeholder='Enter pre-SQL script for source table'
+            )
+            source_test_script = st.text_area(
+                label='Source Test Script',
+                help='Main SQL script for testing on the source table',
+                key='new_source_test_script',
+                placeholder='Enter main SQL script for source table'
+            )
+
+    # Target Scripts
+    with col2:
+        target_pre_sql = st.text_input(
+            label='Target Pre-SQL',
+            help='Pre-SQL script for the target table, if required',
+            key='new_target_pre_sql',
+            placeholder='Enter pre-SQL script for target table'
+        )
+
+        target_test_script = st.text_area(
+            label='Target Test Script :red[* ✨ AI]',
+            help='Main SQL script for testing on the target table',
+            key='new_target_test_script',
+            placeholder='Enter main SQL script for target table'
+        )
+
+    # Criticality, Enabled Flag,  Freq check
+    with st.container(
+        horizontal=True,
+        horizontal_alignment='distribute',
+        vertical_alignment='center',
+    ):
+        criticality = st.selectbox(
+            label='Criticality :red[*]',
+            options=[1, 2, None],
+            help='Indicates the criticality level of the test',
+            key='new_criticality',
+        )
+
+        enabled_flag = st.selectbox(
+            label='Enabled :red[*]',
+            options=['OFF', 'ON', None],
+            help='Indicates if the test is enabled (Y or N)',
+            key='new_enabled_flag',
+        )
+
+
+
+        frequency_check_options = [None] + list(range(0,100))
+        frequency_check = st.selectbox(
+            options=frequency_check_options,
+            index=0,
+            label='Frequency Check',
+            help='Frequency of the test execution',
+            key='new_frequency_check',
+            # min_value=0,
+        )
+
+    ds_coverage_object = st.selectbox(
+        label='DS Coverage Object :red[*]',
+        options=product_objects,
+        width='stretch',
+        help='Test case supposed to map which target table name',
+        key='new_ds_coverage_object',
+    )
+
+
+    if sst.get('new_test_thresholds_df') is None:
+        df = pd.DataFrame(
+            columns=[
+                '', 'ORDER', 'THRESHOLDTYPE', 'MINWARNINGTHRESHOLD',
+               'MAXWARNINGTHRESHOLD', 'MINFAILTHRESHOLD', 'MAXFAILTHRESHOLD',
+               'FLOORVALUE', 'CEILINGVALUE'
+            ],
+        )
+        sst['new_test_thresholds_df_key'] = f"new_test_thresholds_df-{random.randrange(0, 1000)}"
+        sst['new_test_thresholds_df'] = df
+
+
+    st.markdown('Thresholds')
+    sst['edited_new_test_threshold_df'] = st.data_editor(
+        data=sst['new_test_thresholds_df'],
+        key=sst['new_test_thresholds_df_key'],
+        use_container_width=True,
+        hide_index=True,
+        column_order=[
+            '', 'ORDER', 'THRESHOLDTYPE', 'MINWARNINGTHRESHOLD',
+            'MAXWARNINGTHRESHOLD', 'MINFAILTHRESHOLD', 'MAXFAILTHRESHOLD',
+            'FLOORVALUE', 'CEILINGVALUE'
+        ],
+        column_config={
+            '': st.column_config.CheckboxColumn(pinned=True),
+            'ORDER': st.column_config.NumberColumn(label="ORDER", min_value=0, max_value=100, pinned=True),
+            'THRESHOLDTYPE': st.column_config.SelectboxColumn(
+                label='TYPE',
+                options=['NUMBER', 'PERCENT'],
+                help='Type of threshold (e.g., NUMBER, PERCENT)'
+            ),
+            'MINWARNINGTHRESHOLD': st.column_config.NumberColumn(
+                label='MINWARN',
+                # required=True,
+                help='Minimum warning threshold'
+            ),
+            'MAXWARNINGTHRESHOLD': st.column_config.NumberColumn(
+                label='MAXWARN',
+                # required=True,
+                help='Maximum warning threshold'
+            ),
+            'MINFAILTHRESHOLD': st.column_config.NumberColumn(
+                label='MINFAIL',
+                # required=True,
+                help='Minimum fail threshold'
+            ),
+            'MAXFAILTHRESHOLD': st.column_config.NumberColumn(
+                label='MAXFAIL',
+                # required=True,
+                help='Maximum fail threshold'
+            ),
+            'FLOORVALUE': st.column_config.NumberColumn(
+                label='FLOOR',
+                # required=True,
+                help='Floor value for the threshold'
+            ),
+            'CEILINGVALUE': st.column_config.NumberColumn(
+                label='CEIL',
+                # required=True,
+                help='Ceiling value for the threshold'
+            ),
+        },
+    )
+
+    # Action buttons
+    with  st.container(
+        horizontal=True,
+        horizontal_alignment='distribute',
+        vertical_alignment='center',
+    ):
+        st.button(
+            label='Add Threshold',
+            # use_container_width=True,
+            key='new_test_threshold',
+            help='Add a new row to threshold grid',
+            on_click=add_new_threshold,
+            args=('new', test_type)
+        )
+
+        with st.container(
+            horizontal=True,
+            horizontal_alignment='right'
+        ):
+
+            cancel_test = st.button(
+                label='Cancel',
+                # use_container_width=True,
+                key='cancel_new_test',
+                help='Cancel adding a new test and close the dialog'
+            )
+
+
+
+            save_test = st.button(
+                label='Save',
+                # use_container_width=True,
+                key='save_new_test',
+                help='Save the new test to the testplan table'
+            )
+
+    if cancel_test:
+        # Reset the session state for new test thresholds
+        del_states = [
+            'new_test_thresholds_df',
+            'new_test_thresholds_df_key',
+            'edited_new_test_threshold_df',
+        ]
+        for state in del_states:
+            if sst.get(state) is not None:
+                del sst[state]
+        st.rerun()
+
+    if save_test:
+        # Capture form data into a dict
+        data = {
+            'JOBID': job_id,
+            'JOBNAME': job_name,
+            'TESTTYPE': test_type,
+            'TESTCASEDESCRIPTION': test_description,
+            'TESTCATEGORY': test_category,
+            'SOURCEPRESQL': source_pre_sql,
+            'SOURCETESTSCRIPT': source_test_script,
+            'TARGETPRESQL': target_pre_sql,
+            'TARGETTESTSCRIPT': target_test_script,
+            'DS_COVERAGE_OBJECT': ds_coverage_object,
+            'EXECUTIONSTEP': 'POST-CHECK',
+            'RESULTSETCOLS': None,  # Assuming this is not required for new tests
+            'RESULTSETCOLNAME': None,  # Assuming this is not required for new tests
+            'ENABLEDFLAG': enabled_flag,
+            'CRITICALITY': criticality,
+            'FREQUENCYCHECK': frequency_check,
+            'SCHEDULER_FREQ': 'DAILY'
+        }
+
+        selected_thresholds = sst['edited_new_test_threshold_df']
+
+        status, new_ids = validate_form(product_warehouse, test_type, data, selected_thresholds)
+
+        # Stop if validation's fail
+        if not status:
+            st.stop()
+
+        with st.spinner('Saving thresholds ...'):
+            res = save_thresholds(selected_thresholds, product_warehouse)
+            if res['status'] != 'Success':
+                st.error(f"Failed to save thresholds: {res['error']}")
+                return None
+            else:
+                st.success('Thresholds saved successfully')
+                # Add the ids to the threshold_ids list
+                # existing_ids = res['existing_ids']
+                new_ids = res['newly_added_ids']
+                ordered_ids = res['ordered_ids']
+
+
+                # Convert threshold ids into a comma-separated string
+                data['THRESHOLDID'] = ','.join([str(thid) for thid in ordered_ids])
+
+        # Save the new test to the database
+        with st.spinner('Saving test...'):
+            data['DSID'] = generate_dsid()
+            status, msg = save_single_test(data, product_warehouse)
+
+        if status != 'Success':
+            st.error(f"Error saving test: {msg}")
+        else:
+            st.success('Test successfully updated in testplan table')
+            # reload_page('Success', 5)
+            with st.spinner('Reloading in 5 sec'):
+                time.sleep(4)
+                reset_states = [
+                    # 'tp_job_config_df', # no need to refresh only the test_design table is effected
+                    # 'tp_threshold_df,   # no need to refresh only the test_design table is effected
+                    'tp_testplan_df',
+                    'tp_testplan_df_key',
+                    'edited_tp_testplan_df',
+                    'previous_tp_job_id',
+                    'unsaved_testplan_changes',
+                    'tp_test_results_df',
+
+                    'new_test_thresholds_df',
+                    'new_test_thresholds_df_key',
+                    'edited_new_test_threshold_df',
+
+                ]
+                # reload thresholds table if new ids are added
+                if new_ids:
+                    reset_states.append('tp_threshold_df')
+
+                for state in reset_states:
+                    if sst.get(state) is not None:
+                        del sst[state]
+                st.rerun()
+
+
+    return None
+
+
+@st.dialog(title='Edit Selected Test', width='large')
+def edit_selected_test_dialog(product_objects, product_warehouse, job_id, job_name, test_data, test_categories):
+    """Dialog to edit the selected test in the testplan table"""
+    st.markdown(f"Edit test: {test_data['DSID']}, :red[✨ AI]")
+
+    # Test Category, Test Desc, Test Type
+    with st.container(
+        horizontal=True,
+        horizontal_alignment='distribute',
+        vertical_alignment='center',
+    ):
+
+        prev_test_category = test_data['TESTCATEGORY']
+        test_category_options = test_categories
+        test_category_index = test_category_options.index(prev_test_category) if prev_test_category in test_category_options else 0
+        test_category = st.selectbox(
+            label='Test Category :red[*]',
+            options=test_category_options,
+            index=test_category_index,
+            help='Category of the test for easier classification',
+            key='new_test_category'
+        )
+
+        test_description = st.text_input(
+            label='Test Case Description :red[*]',
+            value=test_data['TESTCASEDESCRIPTION'],
+            help='Description of the test case and its objective',
+            key='new_test_description',
+        )
+
+        prev_test_type = test_data['TESTTYPE']
+        test_type_options = ['SINGLE DATAPOINT', 'MULTI DATAPOINT', 'MINUS QUERY', None]
+        test_type_index = test_type_options.index(prev_test_type) if prev_test_type in test_type_options else 0
+
+        test_type = st.selectbox(
+            label='Test Type :red[*]',
+            options=test_type_options,
+            index=test_type_index,
+            help='Type of test to be performed',
+            key='new_test_type',
+        )
+
+    # Sql inputs
+    # only show source pre test if MINUS QUERY else empty ""
+    if test_type != 'MINUS QUERY':
+        col1 = None
+        col2 = st.container()
+    else:
+        col1, col2 = st.columns([1, 1])
+
+    prev_source_pre_sql = test_data['SOURCEPRESQL'] if test_data['SOURCEPRESQL']  else ''
+    prev_source_test_script = test_data['SOURCETESTSCRIPT'] if test_data['SOURCETESTSCRIPT'] else ''
+    # Source scripts
+    source_pre_sql = prev_source_pre_sql
+    source_test_script = prev_source_test_script
+    if col1 is not None:
+        with col1:
+            source_pre_sql = st.text_input(
+                label='Source Pre-SQL',
+                help='Pre-SQL script for the source table, if required',
+                key='new_source_pre_sql',
+                value=prev_source_pre_sql,
+                placeholder='Enter pre-SQL script for source table'
+            )
+            source_test_script = st.text_area(
+                label='Source Test Script',
+                help='Main SQL script for testing on the source table',
+                key='new_source_test_script',
+                value=prev_source_test_script,
+                placeholder='Enter main SQL script for source table'
+            )
+
+    with col2:
+        prev_target_pre_sql = test_data['TARGETPRESQL'] if test_data['TARGETPRESQL'] else ''
+        target_pre_sql = st.text_input(
+            label='Target Pre-SQL',
+            help='Pre-SQL script for the target table, if required',
+            key='new_target_pre_sql',
+            placeholder='Enter pre-SQL script for target table',
+            value=prev_target_pre_sql
+        )
+
+        prev_target_test_script = test_data['TARGETTESTSCRIPT'] if test_data['TARGETTESTSCRIPT'] else ''
+        target_test_script = st.text_area(
+            label='Target Test Script :red[* ✨ AI]',
+            help='Main SQL script for testing on the target table',
+            key='new_target_test_script',
+            placeholder='Enter main SQL script for target table',
+            value=prev_target_test_script
+        )
+
+    # Criticality, Enabled Flag, Frequency Check
+    with st.container(
+        horizontal=True,
+        horizontal_alignment='distribute',
+        vertical_alignment='center',
+    ):
+        prev_criticality = test_data['CRITICALITY']
+        criticality_options = [1, 2, None]
+        criticality_index = criticality_options.index(prev_criticality) if prev_criticality in criticality_options else 0
+
+        criticality = st.selectbox(
+            label='Criticality :red[*]',
+            options=criticality_options,
+            index=criticality_index,
+            help='Indicates the criticality level of the test',
+            key='new_criticality',
+        )
+
+        prev_enabled_flag = test_data['ENABLEDFLAG']
+        enabled_flag_options = ['OFF', 'ON']
+        enabled_flag_index = enabled_flag_options.index(prev_enabled_flag) if prev_enabled_flag in enabled_flag_options else 0
+
+        enabled_flag = st.selectbox(
+            label='Enabled :red[*]',
+            options=enabled_flag_options,
+            index=enabled_flag_index,
+            help='Indicates if the test is enabled (Y or N)',
+            key='new_enabled_flag',
+        )
+
+
+        prev_frequency_check = test_data['FREQUENCYCHECK']
+        prev_frequency_check = None if str(prev_frequency_check) in {'None', 'nan'} else prev_frequency_check
+
+        frequency_check_options = [None] + list(range(0,100))
+        freq_check_index = frequency_check_options.index(prev_frequency_check) if prev_frequency_check in frequency_check_options else 0
+        frequency_check = st.selectbox(
+            options=frequency_check_options,
+            index=freq_check_index,
+            label='Frequency Check',
+            help='Frequency of the test execution',
+            key='update_frequency_check',
+        )
+
+    prev_ds_coverage_object = test_data['DS_COVERAGE_OBJECT'] if test_data['DS_COVERAGE_OBJECT'] else ''
+    ds_coverage_object_options = product_objects
+    ds_coverage_object_index = ds_coverage_object_options.index(
+        prev_ds_coverage_object) if prev_ds_coverage_object in ds_coverage_object_options else 0
+
+    ds_coverage_object = st.selectbox(
+        label='DS Coverage Object :red[*]',
+        options=ds_coverage_object_options,
+        index=ds_coverage_object_index,
+        width='stretch',
+        help='Test case supposed to map which target table name',
+        key='new_ds_coverage_object',
+    )
+
+    # Thresholds grid
+    with  st.container():
+        if sst.get('edit_test_thresholds_df') is None:
+            # Load prev threshold is data add them into grid mark them as checked
+            prev_threshold_ids = test_data['THRESHOLDID'] if test_data['THRESHOLDID'] else ''
+            prev_threshold_ids = parse_threshold_ids(prev_threshold_ids)
+
+            thresholds_df = sst['tp_threshold_df']
+
+            # Convert your list into a DataFrame
+            id_df = pd.DataFrame(prev_threshold_ids, columns=['THRESHOLDID'])
+
+            # Merge to preserve duplicates
+            prev_thresholds_data = id_df.merge(
+                thresholds_df,
+                on='THRESHOLDID',
+                how='left'
+            )[[
+                'THRESHOLDTYPE', 'MINWARNINGTHRESHOLD',
+                'MAXWARNINGTHRESHOLD', 'MINFAILTHRESHOLD', 'MAXFAILTHRESHOLD',
+                'FLOORVALUE', 'CEILINGVALUE'
+            ]]
+
+            # Add '' boolean col
+            prev_thresholds_data.insert(0, '', True)
+
+            # Set ORDER as index
+            prev_thresholds_data['ORDER'] = list(range(1, len(prev_thresholds_data) + 1))
+
+            df = prev_thresholds_data
+
+            sst['edit_test_thresholds_df_key'] = f"new_test_thresholds_df-{random.randrange(0, 1000)}"
+            sst['edit_test_thresholds_df'] = df
+
+        st.markdown('Thresholds')
+        sst['edited_edit_test_threshold_df'] = st.data_editor(
+            data=sst['edit_test_thresholds_df'],
+            key=sst['edit_test_thresholds_df_key'],
+            use_container_width=True,
+            hide_index=True,
+            column_order=[
+                '', 'ORDER', 'THRESHOLDTYPE', 'MINWARNINGTHRESHOLD',
+                'MAXWARNINGTHRESHOLD', 'MINFAILTHRESHOLD', 'MAXFAILTHRESHOLD',
+                'FLOORVALUE', 'CEILINGVALUE'
+            ],
+            column_config={
+                '': st.column_config.CheckboxColumn(pinned=True),
+                'ORDER': st.column_config.NumberColumn(label="ORDER", min_value=0, max_value=100, pinned=True),
+                'THRESHOLDTYPE': st.column_config.SelectboxColumn(
+                    label='TYPE',
+                    options=['NUMBER', 'PERCENT'],
+                    help='Type of threshold (e.g., NUMBER, PERCENT)'
+                ),
+                'MINWARNINGTHRESHOLD': st.column_config.NumberColumn(
+                    label='MINWARN',
+                    # required=True,
+                    help='Minimum warning threshold'
+                ),
+                'MAXWARNINGTHRESHOLD': st.column_config.NumberColumn(
+                    label='MAXWARN',
+                    # required=True,
+                    help='Maximum warning threshold'
+                ),
+                'MINFAILTHRESHOLD': st.column_config.NumberColumn(
+                    label='MINFAIL',
+                    # required=True,
+                    help='Minimum fail threshold'
+                ),
+                'MAXFAILTHRESHOLD': st.column_config.NumberColumn(
+                    label='MAXFAIL',
+                    # required=True,
+                    help='Maximum fail threshold'
+                ),
+                'FLOORVALUE': st.column_config.NumberColumn(
+                    label='FLOOR',
+                    # required=True,
+                    help='Floor value for the threshold'
+                ),
+                'CEILINGVALUE': st.column_config.NumberColumn(
+                    label='CEIL',
+                    # required=True,
+                    help='Ceiling value for the threshold'
+                ),
+            },
+        )
+
+
+    # Action Buttons
+    with st.container(
+        horizontal=True,
+        horizontal_alignment='left',
+        vertical_alignment='center',
+    ):
+        st.button(
+            label='Add Threshold',
+            # use_container_width=True,
+            key='edit_existing_test_threshold',
+            help='Add a new row to threshold grid',
+            on_click=add_new_threshold,
+            args=('edit', test_type)  # Pass 'edit' to differentiate from new test
+        )
+        with st.container(
+            horizontal=True,
+            horizontal_alignment='right',
+            vertical_alignment='center'
+        ):
+
+            cancel_test = st.button(
+                label='Cancel',
+                # use_container_width=True,
+                key='cancel_edit_test',
+                help='Cancel editing the test and close the dialog'
+            )
+
+            save_test = st.button(
+                label='Save',
+                # use_container_width=True,
+                key='save_edit_test',
+                help='Save the edited test to the testplan table'
+            )
+
+
+    if cancel_test:
+        # Reset the session state for edit test thresholds
+        del_states = [
+            'edit_test_thresholds_df',
+            'edit_test_thresholds_df_key',
+            'edited_edit_test_threshold_df',
+        ]
+        for state in del_states:
+            if sst.get(state) is not None:
+                del sst[state]
+        st.rerun()
+
+    if save_test:
+        # Capture form data into a dict
+        data = test_data.to_dict()
+        data.update({
+            'JOBID': job_id,
+            'JOBNAME': job_name,
+            'TESTTYPE': test_type,
+            'TESTCASEDESCRIPTION': test_description,
+            'TESTCATEGORY': test_category,
+            'SOURCEPRESQL': source_pre_sql,
+            'SOURCETESTSCRIPT': source_test_script,
+            'TARGETPRESQL': target_pre_sql,
+            'TARGETTESTSCRIPT': target_test_script,
+            'DS_COVERAGE_OBJECT': ds_coverage_object,
+
+            'ENABLEDFLAG': enabled_flag,
+            'CRITICALITY': criticality,
+            'FREQUENCYCHECK': frequency_check,
+
+        })
+        selected_thresholds = sst['edited_edit_test_threshold_df']
+
+        status, new_ids = validate_form(product_warehouse, test_type, data, selected_thresholds)
+
+        # Stop if validation's fail
+        if not status:
+            st.stop()
+
+        # Save the edited test to the database
+        with st.spinner('Saving the edited test...'):
+            status, msg = save_single_test(data, product_warehouse)
+        if status != 'Success':
+            st.error(f"Error saving test: {msg}")
+        else:
+            st.success('Test successfully updated in the testplan table')
+            # reload_page('Success', 5)
+            with st.spinner('Reloading in 5 sec'):
+                time.sleep(5)
+                reset_states = [
+                    'tp_testplan_df',
+                    'tp_testplan_df_key',
+                    'edited_tp_testplan_df',
+                    'previous_tp_job_id',
+                    'unsaved_testplan_changes',
+                    'tp_test_results_df',
+                    'tp_threshold_df',
+
+                    'edit_test_thresholds_df',
+                    'edit_test_thresholds_df_key',
+                    'edited_edit_test_threshold_df',
+
+
+                ]
+
+                # reload thresholds table if new ids are added
+                if new_ids:
+                    reset_states.append('tp_threshold_df')
+
+                for state in reset_states:
+                    if sst.get(state) is not None:
+                        del sst[state]
+                st.rerun()
+
+        return None
+
+    return None
+
+@st.fragment()
+def single_test_management_widget(product_id, product_database, product_warehouse, product_objects, job_id, job_name, test_categories, tab_key):
+    """Widget to manage single test"""
+    # Reload testplan table, page loads for first time, job id is changed, cancel button is clicked
+    if sst.get('tp_testplan_df') is None:
+        logger.info("Loading Testplan table from DB")
+        testplan_df = get_test_plan(job_id, product_warehouse)
+
+        # Convert DSID to string for consistency
+        testplan_df['DSID'] = testplan_df['DSID'].astype(str)
+
+        # Mark all records as 'edited' if the testplan table is not empty
+        if not testplan_df.empty:
+            testplan_df['COLOR_FLAG'] = 'edited'
+
+        testplan_df.insert(0, '', False)
+        sst['tp_testplan_df'] = testplan_df
+        sst['tp_testplan_df_key'] = f"{tab_key}-tp edit grid-{random.randrange(0, 1000)}"
+
+    # Display the testplan table as a grid and allow user to select records
+    edited_testplan_df = st.data_editor(
+        data=sst['tp_testplan_df'],
+        key=sst['tp_testplan_df_key'],
+        hide_index=True,
+        column_order=[
+            '', 'DSID', 'TESTTYPE',
+            'TESTCASEDESCRIPTION', 'TESTCATEGORY',
+            'SOURCEPRESQL', 'SOURCETESTSCRIPT',
+            'TARGETPRESQL', 'TARGETTESTSCRIPT',
+
+            'DS_COVERAGE_OBJECT', 'THRESHOLDID',
+            'EXECUTIONSTEP',
+            'ENABLEDFLAG', 'CRITICALITY',
+            'FREQUENCYCHECK', 'SCHEDULER_FREQ',
+            'RESULTSETCOLS', 'RESULTSETCOLNAME'
+        ],
+        use_container_width=True,
+        disabled=[
+            'DSID', 'TESTTYPE',
+            'TESTCASEDESCRIPTION', 'TESTCATEGORY',
+            'SOURCEPRESQL', 'SOURCETESTSCRIPT',
+            'TARGETPRESQL', 'TARGETTESTSCRIPT',
+
+            'DS_COVERAGE_OBJECT', 'THRESHOLDID',
+            'EXECUTIONSTEP',
+            'ENABLEDFLAG', 'CRITICALITY',
+            'FREQUENCYCHECK', 'SCHEDULER_FREQ',
+            'RESULTSETCOLS', 'RESULTSETCOLNAME'
+        ]
+    )
+
+    add_test_col, edit_test_col, _ = st.columns([1, 1, 7], gap='small')
+
+    with add_test_col:
+        add_test = st.button(
+            label='➕ :green[Add]',
+            use_container_width=True,
+            key=f"{tab_key} new test popup",
+            help='Add a new row to the testplan table',
+        )
+
+    with edit_test_col:
+        edit_test = st.button(
+            label='✏️ :blue[Edit]',
+            use_container_width=True,
+            key=f"{tab_key} edit selected test",
+            help='Edit the selected test in the testplan table'
+        )
+
+    if add_test:
+        add_new_test_dialog(product_objects, product_warehouse, job_id, job_name,  test_categories)
+
+    if edit_test:
+        # Get the selected records
+        selected_testplan_records = edited_testplan_df.loc[edited_testplan_df[''] == True]
+
+        if selected_testplan_records.shape[0] == 0:
+            st.warning('No test selected for editing')
+            return
+
+        if selected_testplan_records.shape[0] > 1:
+            st.warning('Please select only one test for editing')
+            return
+
+        # Get the first record to edit
+        test_data = selected_testplan_records.iloc[0]
+
+        # Get threshold's for tests and display them
+        edit_selected_test_dialog(product_objects, product_warehouse, job_id, job_name, test_data, test_categories)
+
+

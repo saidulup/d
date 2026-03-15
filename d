@@ -8,12 +8,8 @@
       $match: {
         $expr: {
           $eq: [
-            {
-              $toString: "$chat_id"
-            },
-            {
-              $toString: "$$chatId"
-            }
+            { $toString: "$chat_id" },
+            { $toString: "$$chatId" }
           ]
         }
       }
@@ -28,6 +24,11 @@
             onNull: null
           }
         }
+      }
+    },
+    {
+      $match: {
+        msg_dt: { $ne: null }
       }
     },
     {
@@ -48,118 +49,123 @@
     },
     {
       $sort: {
-        msg_dt: 1
+        msg_dt: 1,
+        _id: 1
       }
     },
-    // mark assistant fields only on assistant rows
+    {
+      $setWindowFields: {
+        sortBy: {
+          msg_dt: 1,
+          _id: 1
+        },
+        output: {
+          turn_no: {
+            $sum: {
+              $cond: [
+                { $eq: ["$role", "user"] },
+                1,
+                0
+              ]
+            },
+            window: {
+              documents: ["unbounded", "current"]
+            }
+          }
+        }
+      }
+    },
     {
       $addFields: {
+        user_question_if_any: {
+          $cond: [
+            { $eq: ["$role", "user"] },
+            "$content",
+            null
+          ]
+        },
+        asked_at_if_any: {
+          $cond: [
+            { $eq: ["$role", "user"] },
+            "$msg_dt",
+            null
+          ]
+        },
         assistant_sql_if_any: {
           $cond: [
-            {
-              $eq: ["$role", "assistant"]
-            },
+            { $eq: ["$role", "assistant"] },
             "$sql_response",
             null
           ]
         },
         assistant_text_if_any: {
           $cond: [
-            {
-              $eq: ["$role", "assistant"]
-            },
+            { $eq: ["$role", "assistant"] },
             "$text_response",
             null
           ]
         },
         assistant_md_if_any: {
           $cond: [
-            {
-              $eq: ["$role", "assistant"]
-            },
+            { $eq: ["$role", "assistant"] },
             "$content.markdown_response",
             null
           ]
         }
       }
     },
-    // ONLY 2 look-ahead retries
     {
-      $setWindowFields: {
-        sortBy: {
-          msg_dt: 1
-        },
-        output: {
-          next_sql_1: {
-            $shift: {
-              output: "$assistant_sql_if_any",
-              by: -1
-            }
-          },
-          next_sql_2: {
-            $shift: {
-              output: "$assistant_sql_if_any",
-              by: -2
-            }
-          },
-          next_text_1: {
-            $shift: {
-              output: "$assistant_text_if_any",
-              by: -1
-            }
-          },
-          next_text_2: {
-            $shift: {
-              output: "$assistant_text_if_any",
-              by: -2
-            }
-          },
-          next_md_1: {
-            $shift: {
-              output: "$assistant_md_if_any",
-              by: -1
-            }
-          },
-          next_md_2: {
-            $shift: {
-              output: "$assistant_md_if_any",
-              by: -2
-            }
-          }
-        }
+      $group: {
+        _id: "$turn_no",
+        asked_at: { $first: "$asked_at_if_any" },
+        question: { $first: "$user_question_if_any" },
+        assistant_sqls: { $push: "$assistant_sql_if_any" },
+        assistant_texts: { $push: "$assistant_text_if_any" },
+        assistant_mds: { $push: "$assistant_md_if_any" }
       }
     },
-    // keep only user questions
     {
       $match: {
-        role: "user"
-      }
-    },
-    // pick nearest non-null from next 2
-    {
-      $addFields: {
-        sql_response: {
-          $ifNull: ["$next_sql_1", "$next_sql_2"]
-        },
-        text_response: {
-          $ifNull: [
-            "$next_text_1",
-            "$next_text_2"
-          ]
-        },
-        markdown_response: {
-          $ifNull: ["$next_md_1", "$next_md_2"]
-        }
+        question: { $ne: null }
       }
     },
     {
       $project: {
         _id: 0,
-        asked_at: "$msg_dt",
-        question: "$content",
-        sql_response: 1,
-        text_response: 1,
-        markdown_response: 1
+        asked_at: 1,
+        question: 1,
+        sql_response: {
+          $reduce: {
+            input: "$assistant_sqls",
+            initialValue: null,
+            in: {
+              $ifNull: ["$$value", "$$this"]
+            }
+          }
+        },
+        text_response: {
+          $reduce: {
+            input: "$assistant_texts",
+            initialValue: null,
+            in: {
+              $ifNull: ["$$value", "$$this"]
+            }
+          }
+        },
+        markdown_response: {
+          $reduce: {
+            input: "$assistant_mds",
+            initialValue: null,
+            in: {
+              $ifNull: ["$$value", "$$this"]
+            }
+          }
+        }
+      }
+    },
+    {
+      $sort: {
+        asked_at: 1
       }
     }
   ],

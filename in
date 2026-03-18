@@ -1,28 +1,14 @@
-create or replace temporary table tmp_fltn as (
-select p.JOBNAME,p.EXECUTIONSTEP,p.ENVIRONMENT_ID,p.TESTCASEDESCRIPTION,NVL(p.FrequencyCounter,0) as FrequencyCounter ,p.rundate,p.insertTimestamp,p.RUNID,p.ACTV_IND,
-    p.TOTALRUNTIME,p.SQLRUNTIME,f1.seq, f1.key, f1.value::varchar as rslt 
-    from DSE_TESTRESULTS p,
-    lateral flatten(input => p.METRICRESULTS) f,
-    lateral flatten(input => f.value) f1 
-    where p.dsid = :DSID 
-    and p.ENVIRONMENT_ID = :v_ENVIRONMENT_ID);
+LEFT JOIN (
+    Select distinct DSID,ENVIRONMENT_ID, MetricId, MetricName
+    from TEMP_DSE_TESTRESULTS_STG
+    where ENVIRONMENT_ID = :v_ENVIRONMENT_ID
+) DPR
 
-    create or replace temporary table tmp_fltn as
-select
-    p.JOBNAME,
-    p.EXECUTIONSTEP,
-    p.ENVIRONMENT_ID,
-    p.TESTCASEDESCRIPTION,
-    nvl(p.FrequencyCounter,0) as FrequencyCounter,
-    p.rundate,
-    p.insertTimestamp,
-    p.RUNID,
-    p.ACTV_IND,
-    p.TOTALRUNTIME,
-    p.SQLRUNTIME,
-    f1.seq,
-    f1.key,
-    f1.value::varchar as rslt
-from TMP_PRIOR_TESTRESULTS p,
-     lateral flatten(input => p.METRICRESULTS) f,
-     lateral flatten(input => f.value) f1;
+LEFT JOIN (
+    select distinct DSID, ENVIRONMENT_ID, RUNID, ACTV_IND, MetricId, MetricName
+    from TEMP_DSE_TESTRESULTS_STG
+    where DSID = :DSID
+      and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
+      and RUNID = :v_MAX_RUNID
+      and ACTV_IND = 'Y'
+) DPR

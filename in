@@ -1,177 +1,19 @@
-Missed places
-1) tmp_fltn loads all history for DSID/environment
-
-Here it should have been restricted to the prior active run, but it is not:
-
-create or replace temporary table tmp_fltn as (
-  select ...
-  from DSE_TESTRESULTS p,
-       lateral flatten(input => p.METRICRESULTS) f,
-       lateral flatten(input => f.value) f1
-  where p.dsid = :DSID
-    and p.ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-);
-Missing
-
-RUNID = :v_MAX_RUNID
-
-ACTV_IND = 'Y'
-
-This is the biggest inconsistency because once TEMP_DSE_TESTRESULTS_STG is built from all runs, later joins can pick the wrong old row.
-
-2) Metric-id reuse join DPR
-
-This join uses all staged rows for the environment:
-
-LEFT JOIN (
-  Select distinct DSID, ENVIRONMENT_ID, MetricId, MetricName
-  from TEMP_DSE_TESTRESULTS_STG
-  where ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-) DPR
-Missing
-
-DSID = :DSID
-
-RUNID = :v_MAX_RUNID
-
-ACTV_IND = 'Y'
-
-So metric ids can come from any staged historical row for that environment.
-
-3) Max metric-id join DPR1
-
-This one also uses all staged rows for the DSID/environment:
-
-LEFT JOIN (
-  Select distinct DSID, ENVIRONMENT_ID, max(MetricId) as metricId
-  from TEMP_DSE_TESTRESULTS_STG
-  where DSID = :DSID
-    and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-  group by DSID, ENVIRONMENT_ID
-) DPR1
-Missing
-
-RUNID = :v_MAX_RUNID
-
-ACTV_IND = 'Y'
-
-So the max metric id can come from an older/inactive run too.
-
-4) Prior result lookup lst
-
-This one is close, but still incomplete:
-
-select DSID, ENVIRONMENT_ID, metricId, metricName, result1, ...
-from TEMP_DSE_TESTRESULTS_STG
+select MAX(RUNID)
+into :v_MAX_RUNID
+from DSE_TESTRESULTS
 where DSID = :DSID
-  and Runid = :v_MAX_RUNID
-  and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-Missing
-
-ACTV_IND = 'Y'
-
-If same runid exists in stage with both active and inactive rows, this can still mix data.
-
-5) “Lost metrics from prior run” logic
-
-Outer query:
-
-where R.DSID = :DSID
-  and R.runid = (
-      select max(runid)
-      from TEMP_DSE_TESTRESULTS_STG
-      where runid < :v_RunId
-        and DSID = :DSID
-        and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-  )
-  and R.metricId <> 0
-  and R.ACTV_IND = 'Y'
-  and R.ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-Missing in inner subquery
-
-ACTV_IND = 'Y'
-
-So the chosen prior runid comes from all staged rows, not only active prior rows.
-
-Also, this block is using a different rule:
-
-max(runid) < current runid
-
-instead of the earlier:
-
-v_MAX_RUNID from DSE_TESTRESULTS where ACTV_IND='Y'
-
-That is another inconsistency.
-
-6) “No prior history” check
-
-This join checks only DSID/environment:
-
-left outer join DSE_TestResults R
-  on DPM.DSID = R.DSID
- and DPM.ENVIRONMENT_ID = R.ENVIRONMENT_ID
-where R.DSID IS NULL
-Missing
-
-RUNID
-
-ACTV_IND = 'Y'
-
-This is not using the same prior-run identity either.
-
-Not a read issue, but still inconsistent
-7) Deactivate previous active rows
-
-This update turns off all active rows for DSID/environment:
-
-Update DSE_TESTRESULTS D1
-Set D1.ACTV_IND = 'N'
-WHERE D1.DSID = :DSID
   and ACTV_IND = 'Y'
-  and D1.ENVIRONMENT_ID = :v_ENVIRONMENT_ID;
-Missing
+  and ENVIRONMENT_ID = :v_ENVIRONMENT_ID;
 
-RUNID = :v_MAX_RUNID
 
-This may be intentional, but it is not using the same key. If bad duplicate actives exist, it deactivates all of them.
-
-Main conclusion
-
-If you want the prior data to be consistently read as:
-
-DSID = :DSID
-AND ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-AND RUNID = :v_MAX_RUNID
-AND ACTV_IND = 'Y'
-
-then the code is currently missing that filter in these main places:
-
-tmp_fltn
-
-DPR
-
-DPR1
-
-lst in prior result update
-
-inner subquery in lost-metrics logic
-
-DSE_TestResults existence join
-
-deactivate update if you want exact-row consistency there too
-
-The most important fix
-
-The safest pattern is:
-
-create or replace temporary table TMP_PRIOR_RUN as
+  create or replace temporary table TMP_PRIOR_TESTRESULTS as
 select *
 from DSE_TESTRESULTS
 where DSID = :DSID
   and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
   and RUNID = :v_MAX_RUNID
-  and ACTV_IND = 'Y';
-
-Then use TMP_PRIOR_RUN everywhere old-run data is needed, instead of using all rows from DSE_TESTRESULTS / TEMP_DSE_TESTRESULTS_STG.
-
-That removes most of the ambiguity immediately.
+  and ACTV_IND = 'Y'
+qualify row_number() over (
+    partition by DSID, ENVIRONMENT_ID, RUNID, JOBNAME, EXECUTIONSTEP, TESTCASEDESCRIPTION
+    order by INSERTTIMESTAMP desc
+) = 1;

@@ -1,9 +1,25 @@
-LEFT JOIN (
-    select DSID, ENVIRONMENT_ID, max(MetricId) as metricId
+LEFT OUTER JOIN (
+    select
+        DSID,
+        ENVIRONMENT_ID,
+        RUNID,
+        ACTV_IND,
+        metricId,
+        metricName,
+        result1,
+        result2,
+        result3,
+        result4,
+        result5,
+        result6,
+        result7,
+        result8,
+        result9,
+        result10,
+        nvl(FrequencyCounter,0) as FrequencyCounter
     from TEMP_DSE_TESTRESULTS_STG
     where DSID = :DSID
-      and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
       and RUNID = :v_MAX_RUNID
+      and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
       and ACTV_IND = 'Y'
-    group by DSID, ENVIRONMENT_ID
-) DPR1
+) lst

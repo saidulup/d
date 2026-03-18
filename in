@@ -1,14 +1,11 @@
-LEFT JOIN (
-    Select distinct DSID,ENVIRONMENT_ID, MetricId, MetricName
-    from TEMP_DSE_TESTRESULTS_STG
-    where ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-) DPR
-
-LEFT JOIN (
-    select distinct DSID, ENVIRONMENT_ID, RUNID, ACTV_IND, MetricId, MetricName
-    from TEMP_DSE_TESTRESULTS_STG
-    where DSID = :DSID
-      and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
-      and RUNID = :v_MAX_RUNID
-      and ACTV_IND = 'Y'
-) DPR
+create or replace temporary table TMP_PRIOR_TESTRESULTS as
+select *
+from DSE_TESTRESULTS
+where DSID = :DSID
+  and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
+  and RUNID = :v_MAX_RUNID
+  and ACTV_IND = 'Y'
+qualify row_number() over (
+    partition by DSID, ENVIRONMENT_ID, RUNID, JOBNAME, EXECUTIONSTEP, TESTCASEDESCRIPTION
+    order by INSERTTIMESTAMP desc
+) = 1;

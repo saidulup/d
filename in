@@ -1,8 +1,9 @@
 LEFT JOIN (
-    select distinct DSID, ENVIRONMENT_ID, RUNID, ACTV_IND, MetricId, MetricName
+    select DSID, ENVIRONMENT_ID, max(MetricId) as metricId
     from TEMP_DSE_TESTRESULTS_STG
     where DSID = :DSID
       and ENVIRONMENT_ID = :v_ENVIRONMENT_ID
       and RUNID = :v_MAX_RUNID
       and ACTV_IND = 'Y'
-) DPR
+    group by DSID, ENVIRONMENT_ID
+) DPR1

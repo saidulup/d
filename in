@@ -1,6 +1,33 @@
+INSERT INTO TEMP_DSE_DataProfile_MetricList
+(
+    DSID, Jobname, ExecutionStep, ENVIRONMENT_ID,
+    MetricName, Result1, Result2, Result3, Result4, Result5,
+    Result6, Result7, Result8, Result9, Result10
+)
+select distinct
+    R.DSID,
+    R.Jobname,
+    R.ExecutionStep,
+    R.ENVIRONMENT_ID,
+    coalesce(R.MetricName,'') as MetricName,
+    null as Result1,
+    null as Result2,
+    null as Result3,
+    null as Result4,
+    null as Result5,
+    null as Result6,
+    null as Result7,
+    null as Result8,
+    null as Result9,
+    null as Result10
+from TEMP_DSE_TESTRESULTS_STG R
+left outer join TEMP_DSE_DataProfile_MetricList M
+    on R.DSID = M.DSID
+   and coalesce(R.MetricName,'') = coalesce(M.MetricName,'')
+   and R.ENVIRONMENT_ID = M.ENVIRONMENT_ID
 where R.DSID = :DSID
   and R.RUNID = :v_MAX_RUNID
   and R.ENVIRONMENT_ID = :v_ENVIRONMENT_ID
   and R.ACTV_IND = 'Y'
   and R.metricId <> 0
-  and M.DSID IS NULL
+  and M.DSID IS NULL;

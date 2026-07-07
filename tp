@@ -1,0 +1,21 @@
+SQL_ATTACHMENT_FORMAT_EXAMPLE = [
+    {
+        "name": "failed_query_1",
+        "query": "select * from <table_name> where <condition>"
+    }
+]
+
+def clean_sql_attachment(value):
+    if pd.isna(value):
+        return None
+    value = str(value).strip()
+    if value.lower() in {'', 'nan', 'none', 'nat'}:
+        return None
+    return value
+
+
+job_config_df['JOB_FAILED_QUERY'] = job_config_df['JOB_FAILED_QUERY'].apply(clean_sql_attachment).fillna('')
+
+
+
+final_jc_data['JOB_FAILED_QUERY'] = final_jc_data['JOB_FAILED_QUERY'].apply(clean_sql_attachment)

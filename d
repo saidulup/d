@@ -1,34 +1,132 @@
 UPDATE DSE_HEALTH_DOMAIN
 SET ASSOCIATED_JOBS = PARSE_JSON(
-'[
-    {
-        "jobid": 40102,
-        "dsids": [40102034,
-40102036,
-40102037,
-40102041,
-40102044,
-40102024,
-40102059,
-40102062,
-40102065,
-40102066,
-40102067,
-40102070]
-    },
-    {
-        "jobid": 40101,
-        "dsids": [40101065,
-40101070,
-40101069,
-40101068,
-40101067,
-40101066,
-40101075,
-40101074,
-40101073]
-    }
-]'
+'{
+    "domain_weight": 10,
+    "usecases": [
+        {
+            "usecase_id": "UC201",
+            "usecase_name": "Members",
+            "usecase_weight": 10,
+            "jobs": [
+                {
+                    "jobid": 40102,
+                    "tests": [
+                        {
+                            "dsid": 40102034,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102036,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102037,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102041,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102044,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102024,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102059,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102062,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102065,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102066,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102067,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40102070,
+                            "weight": 5,
+                            "critical": false
+                        }
+                    ]
+                },
+                {
+                    "jobid": 40101,
+                    "tests": [
+                        {
+                            "dsid": 40101065,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101070,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101069,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101068,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101067,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101066,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101075,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101074,
+                            "weight": 5,
+                            "critical": false
+                        },
+                        {
+                            "dsid": 40101073,
+                            "weight": 5,
+                            "critical": false
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}'
 )
 WHERE HEALTH_AREA_ID = '2'
   AND DOMAIN_ID = '201';

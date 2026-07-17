@@ -192,7 +192,7 @@ def initialize_session_state() -> None:
         "selected_job_id": None,
         "ui_revision": 0,
         "new_usecase_form_revision": 0,
-        "active_view": "analysis",
+        "active_view": "home",
         "last_selector_health_area_id": None,
     }
 
@@ -1137,242 +1137,284 @@ def build_health_area_overview(saved_rows_df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+
+
 # ============================================================
-# PAGE RENDERERS
+# CLEAN PAGE NAVIGATION
 # ============================================================
 
 
-def render_analysis() -> None:
-    st.subheader("Configuration Overview")
-    st.caption(
-        "See the complete configuration coverage and weight influence before saving. "
-        "This view uses the current working changes for the selected Domain and saved "
-        "configurations for the other Domains in the Health Area."
-    )
+def go_to(page_name: str) -> None:
+    st.session_state.active_view = page_name
+    st.rerun()
 
-    try:
-        saved_rows_df = load_saved_configuration_rows()
-    except Exception as error:
-        st.error("Unable to load saved configurations for analysis.")
-        st.exception(error)
-        return
 
-    area_overview_df = build_health_area_overview(saved_rows_df)
-    working_counts = working_configuration_counts()
-
-    configured_domains = (
-        int((area_overview_df["STATUS"] != "Not configured").sum())
-        if not area_overview_df.empty else 0
-    )
-
-    area_metric_1, area_metric_2, area_metric_3, area_metric_4 = st.columns(4)
-    with area_metric_1:
-        st.metric("Domains", len(area_overview_df))
-    with area_metric_2:
-        st.metric("Configured Domains", configured_domains)
-    with area_metric_3:
-        st.metric(
-            "Use Cases",
-            int(area_overview_df["USECASE_COUNT"].sum())
-            if not area_overview_df.empty else 0,
+def render_context_header(page_title: str) -> None:
+    back_col, title_col, action_col = st.columns([0.8, 5.4, 1.2])
+    with back_col:
+        if st.button("← Home", use_container_width=True, key=f"back_{page_title}"):
+            go_to("home")
+    with title_col:
+        st.markdown(f"## {page_title}")
+        st.caption(
+            f"{st.session_state.active_health_area_name}  /  "
+            f"{st.session_state.active_domain_name}"
         )
-    with area_metric_4:
-        st.metric(
-            "DSIDs",
-            int(area_overview_df["DSID_COUNT"].sum())
-            if not area_overview_df.empty else 0,
-        )
+    with action_col:
+        if st.button("Refresh", use_container_width=True, key=f"refresh_{page_title}"):
+            load_health_domains.clear()
+            load_jobs.clear()
+            load_tests_for_job.clear()
+            load_testplan_jobid_samples.clear()
+            load_saved_configuration_rows.clear()
+            st.rerun()
 
-    st.markdown("#### Health Area Summary")
-    st.dataframe(
-        area_overview_df,
-        use_container_width=True,
-        hide_index=True,
-        column_order=[
-            "DOMAIN_NAME",
-            "STATUS",
-            "DOMAIN_WEIGHT",
-            "HEALTH_AREA_INFLUENCE_PCT",
-            "USECASE_COUNT",
-            "JOB_COUNT",
-            "DSID_COUNT",
-            "CRITICAL_COUNT",
-            "SOURCE",
-        ],
-        column_config={
-            "DOMAIN_NAME": st.column_config.TextColumn("Domain", width="medium"),
-            "STATUS": st.column_config.TextColumn("Status", width="small"),
-            "DOMAIN_WEIGHT": st.column_config.NumberColumn("Domain Weight", width="small"),
-            "HEALTH_AREA_INFLUENCE_PCT": st.column_config.NumberColumn(
-                "Health Area Influence %", format="%.1f%%", width="small"
-            ),
-            "USECASE_COUNT": st.column_config.NumberColumn("Use Cases", width="small"),
-            "JOB_COUNT": st.column_config.NumberColumn("Jobs", width="small"),
-            "DSID_COUNT": st.column_config.NumberColumn("DSIDs", width="small"),
-            "CRITICAL_COUNT": st.column_config.NumberColumn("Critical", width="small"),
-            "SOURCE": st.column_config.TextColumn("Source", width="medium"),
-        },
+
+def open_existing_configuration(
+    health_area_id: str,
+    health_area_name: str,
+    domain_id: str,
+    domain_name: str,
+) -> None:
+    existing_domain_weight, existing_usecases_df, existing_tests_df = (
+        load_existing_configuration(health_area_id, domain_id)
     )
 
-    st.markdown("#### Selected Domain Summary")
-    selected_domain_share = 0.0
-    if not area_overview_df.empty:
-        selected_row = area_overview_df[
-            area_overview_df["DOMAIN_ID"]
-            == clean_text(st.session_state.active_domain_id)
-        ]
-        if not selected_row.empty:
-            selected_domain_share = float(
-                selected_row.iloc[0]["HEALTH_AREA_INFLUENCE_PCT"]
-            )
-
-    domain_metric_1, domain_metric_2, domain_metric_3, domain_metric_4, domain_metric_5 = st.columns(5)
-    with domain_metric_1:
-        st.metric("Domain Weight", int(st.session_state.domain_weight))
-    with domain_metric_2:
-        st.metric("Health Area Influence", f"{selected_domain_share:.1f}%")
-    with domain_metric_3:
-        st.metric("Use Cases", working_counts["USECASE_COUNT"])
-    with domain_metric_4:
-        st.metric("Jobs", working_counts["JOB_COUNT"])
-    with domain_metric_5:
-        st.metric("DSIDs", working_counts["DSID_COUNT"])
-
-    usecases_df = normalize_usecases(st.session_state.usecases_df)
-    tests_df = normalize_tests(st.session_state.tests_df)
-    usecase_summary_df = build_usecase_summary(usecases_df, tests_df)
-    review_df = build_review_dataframe(usecases_df, tests_df)
-
-    if usecase_summary_df.empty:
-        st.info("No Use Cases are configured for the selected Domain.")
-    else:
-        summary_col, chart_col = st.columns([3, 2])
-        with summary_col:
-            st.dataframe(
-                usecase_summary_df,
-                use_container_width=True,
-                hide_index=True,
-                column_order=[
-                    "USECASE_NAME",
-                    "USECASE_WEIGHT",
-                    "DOMAIN_INFLUENCE_PCT",
-                    "JOB_COUNT",
-                    "DSID_COUNT",
-                    "CRITICAL_COUNT",
-                ],
-                column_config={
-                    "USECASE_NAME": "Use Case",
-                    "USECASE_WEIGHT": st.column_config.NumberColumn("Weight", width="small"),
-                    "DOMAIN_INFLUENCE_PCT": st.column_config.NumberColumn(
-                        "Domain Influence %", format="%.1f%%", width="small"
-                    ),
-                    "JOB_COUNT": "Jobs",
-                    "DSID_COUNT": "DSIDs",
-                    "CRITICAL_COUNT": "Critical",
-                },
-            )
-        with chart_col:
-            chart_df = usecase_summary_df[
-                ["USECASE_NAME", "DOMAIN_INFLUENCE_PCT"]
-            ].set_index("USECASE_NAME")
-            st.bar_chart(chart_df, use_container_width=True)
-
-    if not review_df.empty:
-        with st.expander("View DSID influence details", expanded=False):
-            st.dataframe(
-                review_df,
-                use_container_width=True,
-                hide_index=True,
-                column_order=[
-                    "USECASE_NAME",
-                    "JOBNAME",
-                    "DSID",
-                    "TESTCASEDESCRIPTION",
-                    "DSID_WEIGHT",
-                    "DSID_INFLUENCE_PCT",
-                    "CRITICAL",
-                ],
-                column_config={
-                    "USECASE_NAME": "Use Case",
-                    "JOBNAME": "Job",
-                    "DSID": "DSID",
-                    "TESTCASEDESCRIPTION": st.column_config.TextColumn(
-                        "Test Case Description", width="large"
-                    ),
-                    "DSID_WEIGHT": st.column_config.NumberColumn("Weight", width="small"),
-                    "DSID_INFLUENCE_PCT": st.column_config.NumberColumn(
-                        "Use Case Influence %", format="%.1f%%", width="small"
-                    ),
-                    "CRITICAL": st.column_config.CheckboxColumn("Critical"),
-                },
-            )
-
-    validation_errors = validate_configuration(
-        int(st.session_state.domain_weight),
-        usecases_df,
-        tests_df,
+    st.session_state.usecases_df = existing_usecases_df
+    st.session_state.tests_df = existing_tests_df
+    st.session_state.active_health_area_id = health_area_id
+    st.session_state.active_health_area_name = health_area_name
+    st.session_state.active_domain_id = domain_id
+    st.session_state.active_domain_name = domain_name
+    st.session_state.domain_weight = int(existing_domain_weight)
+    st.session_state.selected_usecase_id = (
+        existing_usecases_df.iloc[0]["USECASE_ID"]
+        if not existing_usecases_df.empty
+        else None
     )
+    st.session_state.selected_job_id = None
+    st.session_state.active_view = "home"
+    next_ui_revision()
 
-    st.markdown("#### Save Readiness")
-    if validation_errors:
-        st.warning("The configuration is not ready to save yet.")
-        for error_message in validation_errors:
-            st.write(f"• {error_message}")
-    else:
-        st.success("The configuration is complete and ready to save.")
-        associated_jobs = build_associated_jobs_json(
-            int(st.session_state.domain_weight),
-            usecases_df,
-            tests_df,
+
+def start_new_configuration(
+    health_area_id: str,
+    health_area_name: str,
+    domain_id: str,
+    domain_name: str,
+    default_domain_weight: int,
+) -> None:
+    st.session_state.usecases_df = empty_usecases_dataframe()
+    st.session_state.tests_df = empty_tests_dataframe()
+    st.session_state.active_health_area_id = health_area_id
+    st.session_state.active_health_area_name = health_area_name
+    st.session_state.active_domain_id = domain_id
+    st.session_state.active_domain_name = domain_name
+    st.session_state.domain_weight = int(default_domain_weight)
+    st.session_state.selected_usecase_id = None
+    st.session_state.selected_job_id = None
+    st.session_state.active_view = "home"
+    next_ui_revision()
+
+
+def render_home() -> None:
+    st.markdown("# Health Configuration")
+
+    health_area_options_df = (
+        health_domains_df[["HEALTH_AREA_ID", "HEALTH_AREA_NAME"]]
+        .drop_duplicates()
+        .sort_values("HEALTH_AREA_NAME")
+    )
+    health_area_ids = health_area_options_df["HEALTH_AREA_ID"].tolist()
+    health_area_name_by_id = {
+        clean_text(row["HEALTH_AREA_ID"]): clean_text(row["HEALTH_AREA_NAME"])
+        for _, row in health_area_options_df.iterrows()
+    }
+
+    selector_col_1, selector_col_2, selector_col_3 = st.columns([1.2, 1.5, 0.8])
+
+    with selector_col_1:
+        selected_health_area_id = st.selectbox(
+            "Health Area",
+            options=health_area_ids,
+            index=None,
+            placeholder="Select Health Area",
+            format_func=lambda value: health_area_name_by_id.get(clean_text(value), ""),
+            key="health_area_selector",
         )
 
-        with st.expander("Technical JSON Preview", expanded=False):
-            st.caption("Business users do not need to edit this JSON.")
-            st.json(associated_jobs)
+    current_selector_area = clean_text(selected_health_area_id)
+    if st.session_state.last_selector_health_area_id != current_selector_area:
+        st.session_state.last_selector_health_area_id = current_selector_area
+        st.session_state.domain_selector = None
 
-        if st.button(
-            "Save Configuration",
+    selected_area_domains_df = (
+        health_domains_df[
+            health_domains_df["HEALTH_AREA_ID"] == clean_text(selected_health_area_id)
+        ].copy()
+        if selected_health_area_id
+        else pd.DataFrame()
+    )
+
+    selected_domain_ids = (
+        selected_area_domains_df["DOMAIN_ID"].tolist()
+        if not selected_area_domains_df.empty
+        else []
+    )
+    domain_name_by_id = {
+        clean_text(row["DOMAIN_ID"]): clean_text(row["DOMAIN_NAME"])
+        for _, row in selected_area_domains_df.iterrows()
+    }
+
+    with selector_col_2:
+        selected_domain_id = st.selectbox(
+            "Domain",
+            options=selected_domain_ids,
+            index=None,
+            placeholder="Select Domain",
+            disabled=not selected_health_area_id,
+            format_func=lambda value: domain_name_by_id.get(clean_text(value), ""),
+            key="domain_selector",
+        )
+
+    with selector_col_3:
+        st.text_input(
+            "Domain ID",
+            value=clean_text(selected_domain_id),
+            disabled=True,
+            placeholder="—",
+        )
+
+    selected_health_area_name = (
+        health_area_name_by_id.get(clean_text(selected_health_area_id), "")
+        if selected_health_area_id
+        else ""
+    )
+    selected_domain_name = (
+        domain_name_by_id.get(clean_text(selected_domain_id), "")
+        if selected_domain_id
+        else ""
+    )
+
+    open_col, new_col, refresh_col, spacer_col = st.columns([1.2, 1.0, 0.9, 4.2])
+    with open_col:
+        open_button = st.button(
+            "Open Configuration",
             type="primary",
             use_container_width=True,
-            key="analysis_save_configuration",
-        ):
-            try:
-                with st.spinner("Saving configuration..."):
-                    save_configuration(
-                        health_area_id=clean_text(st.session_state.active_health_area_id),
-                        health_area_name=clean_text(st.session_state.active_health_area_name),
-                        domain_id=clean_text(st.session_state.active_domain_id),
-                        domain_name=clean_text(st.session_state.active_domain_name),
-                        associated_jobs=associated_jobs,
-                    )
+            disabled=not selected_health_area_id or not selected_domain_id,
+            help="Load the configuration already saved for this domain.",
+        )
+    with new_col:
+        new_button = st.button(
+            "Create New",
+            use_container_width=True,
+            disabled=not selected_health_area_id or not selected_domain_id,
+            help="Start a blank configuration for this domain.",
+        )
+    with refresh_col:
+        if st.button("Refresh", use_container_width=True, help="Reload source tables."):
+            load_health_domains.clear()
+            load_jobs.clear()
+            load_tests_for_job.clear()
+            load_testplan_jobid_samples.clear()
+            load_saved_configuration_rows.clear()
+            st.rerun()
 
-                load_health_domains.clear()
-                load_saved_configuration_rows.clear()
-                st.success("Configuration saved successfully to DSE_HEALTH_DOMAIN.")
-            except Exception as error:
-                st.error("Unable to save the configuration.")
-                st.exception(error)
+    if open_button:
+        try:
+            with st.spinner("Opening configuration..."):
+                open_existing_configuration(
+                    clean_text(selected_health_area_id),
+                    selected_health_area_name,
+                    clean_text(selected_domain_id),
+                    selected_domain_name,
+                )
+            st.rerun()
+        except Exception as error:
+            st.error("Unable to open the configuration.")
+            st.exception(error)
+
+    if new_button:
+        selected_domain_row = selected_area_domains_df[
+            selected_area_domains_df["DOMAIN_ID"] == clean_text(selected_domain_id)
+        ].iloc[0]
+        start_new_configuration(
+            clean_text(selected_health_area_id),
+            selected_health_area_name,
+            clean_text(selected_domain_id),
+            selected_domain_name,
+            int(selected_domain_row.get("DOMAIN_WEIGHT", 5)),
+        )
+        st.rerun()
+
+    if not st.session_state.active_domain_id:
+        return
+
+    counts = working_configuration_counts()
+    st.divider()
+    st.markdown(
+        f"### {st.session_state.active_health_area_name}  /  "
+        f"{st.session_state.active_domain_name}"
+    )
+
+    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+    with metric_1:
+        st.metric("Domain Weight", int(st.session_state.domain_weight))
+    with metric_2:
+        st.metric("Use Cases", counts["USECASE_COUNT"])
+    with metric_3:
+        st.metric("Jobs", counts["JOB_COUNT"])
+    with metric_4:
+        st.metric("DSIDs", counts["DSID_COUNT"])
+    with metric_5:
+        st.metric("Critical", counts["CRITICAL_COUNT"])
+
+    nav_col_1, nav_col_2, nav_col_3 = st.columns(3)
+    with nav_col_1:
+        if st.button(
+            "Manage Use Cases",
+            type="primary",
+            use_container_width=True,
+            help="Add, rename, remove, or change use-case weights.",
+        ):
+            go_to("usecases")
+    with nav_col_2:
+        if st.button(
+            "Manage DSIDs",
+            type="primary",
+            use_container_width=True,
+            help="Add DSIDs or change DSID weights and critical flags.",
+        ):
+            go_to("dsids")
+    with nav_col_3:
+        if st.button(
+            "Health Analysis",
+            type="primary",
+            use_container_width=True,
+            help="Review the overall configuration and save it.",
+        ):
+            go_to("analysis")
+
+    close_col, _ = st.columns([1.1, 5.9])
+    with close_col:
+        if st.button("Close", use_container_width=True):
+            st.session_state.usecases_df = empty_usecases_dataframe()
+            st.session_state.tests_df = empty_tests_dataframe()
+            st.session_state.active_health_area_id = None
+            st.session_state.active_health_area_name = ""
+            st.session_state.active_domain_id = None
+            st.session_state.active_domain_name = ""
+            st.session_state.domain_weight = 5
+            st.session_state.selected_usecase_id = None
+            st.session_state.selected_job_id = None
+            st.session_state.active_view = "home"
+            next_ui_revision()
+            st.rerun()
 
 
 def render_usecases() -> None:
-    st.subheader("Use Case Weights")
-    st.caption(
-        "Set the Domain importance and manage the Use Cases inside it. "
-        "Influence percentages are calculated automatically from the relative weights."
-    )
-
-    domain_weight_col, domain_level_col, domain_share_col = st.columns([2, 1, 1])
-    with domain_weight_col:
-        st.slider(
-            "Domain Weight",
-            min_value=1,
-            max_value=10,
-            step=1,
-            key="domain_weight",
-            help="1 = low influence; 5 = standard; 10 = very high influence.",
-        )
-    with domain_level_col:
-        st.metric("Weight Level", weight_level(int(st.session_state.domain_weight)))
+    render_context_header("Use Cases")
 
     active_area_domains_df = health_domains_df[
         health_domains_df["HEALTH_AREA_ID"]
@@ -1389,21 +1431,19 @@ def render_usecases() -> None:
 
     domain_total_weight = float(active_area_domains_df["EFFECTIVE_WEIGHT"].sum())
     domain_share = safe_percentage(st.session_state.domain_weight, domain_total_weight)
-    with domain_share_col:
-        st.metric("Health Area Influence", f"{domain_share:.1f}%")
 
-    st.markdown(
-        """
-        <div class="weight-box">
-            <b>How weights work:</b> weights are relative, not percentages.
-            A weight of <b>10</b> has twice the influence of a weight of <b>5</b>.
-            The Influence % column shows the actual normalized impact.
-            <br><b>Guide:</b> 1–2 Low | 3–4 Below standard | 5–6 Standard |
-            7–8 High | 9–10 Very high.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    weight_col, influence_col = st.columns([3, 1])
+    with weight_col:
+        st.slider(
+            "Domain Weight",
+            min_value=1,
+            max_value=10,
+            step=1,
+            key="domain_weight",
+            help="Relative importance of this domain inside the selected Health Area.",
+        )
+    with influence_col:
+        st.metric("Health Area Influence", f"{domain_share:.1f}%")
 
     usecases_df = normalize_usecases(st.session_state.usecases_df)
     tests_df = normalize_tests(st.session_state.tests_df)
@@ -1411,15 +1451,14 @@ def render_usecases() -> None:
     st.session_state.tests_df = tests_df
     usecase_summary_df = build_usecase_summary(usecases_df, tests_df)
 
-    st.markdown("#### Existing Use Cases")
     if usecase_summary_df.empty:
-        st.info("No Use Cases have been created yet.")
+        st.info("No Use Cases configured.")
     else:
-        usecase_editor_df = usecase_summary_df.copy()
-        usecase_editor_df.insert(0, "REMOVE", False)
+        editor_df = usecase_summary_df.copy()
+        editor_df.insert(0, "REMOVE", False)
 
-        edited_usecase_summary_df = st.data_editor(
-            usecase_editor_df,
+        edited_df = st.data_editor(
+            editor_df,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
@@ -1442,15 +1481,25 @@ def render_usecases() -> None:
             ],
             column_config={
                 "REMOVE": st.column_config.CheckboxColumn(
-                    "Remove", default=False, width="small",
-                    help="Removes the Use Case and all DSIDs assigned to it."
+                    "Remove",
+                    default=False,
+                    width="small",
+                    help="Also removes DSIDs assigned to this Use Case.",
                 ),
                 "USECASE_WEIGHT": st.column_config.NumberColumn(
-                    "Use Case Weight", min_value=1, max_value=10, step=1,
-                    required=True, width="small"
+                    "Weight",
+                    min_value=1,
+                    max_value=10,
+                    step=1,
+                    required=True,
+                    width="small",
+                    help="Relative importance inside this Domain.",
                 ),
                 "DOMAIN_INFLUENCE_PCT": st.column_config.NumberColumn(
-                    "Domain Influence %", format="%.1f%%", width="small"
+                    "Influence %",
+                    format="%.1f%%",
+                    width="small",
+                    help="Calculated from all Use Case weights in this Domain.",
                 ),
                 "USECASE_NAME": st.column_config.TextColumn(
                     "Use Case Name", required=True, width="large"
@@ -1463,8 +1512,13 @@ def render_usecases() -> None:
             key=f"usecase_editor_{st.session_state.ui_revision}",
         )
 
-        if st.button("Apply Use Case Changes", type="primary", use_container_width=True):
-            edited_rows = edited_usecase_summary_df.copy()
+        if st.button(
+            "Apply Changes",
+            type="primary",
+            use_container_width=True,
+            key="apply_usecase_changes",
+        ):
+            edited_rows = edited_df.copy()
             edited_rows["USECASE_NAME"] = (
                 edited_rows["USECASE_NAME"].fillna("").astype(str).str.strip()
             )
@@ -1472,21 +1526,23 @@ def render_usecases() -> None:
                 edited_rows["USECASE_WEIGHT"], errors="coerce"
             )
 
-            usecase_errors: list[str] = []
+            errors: list[str] = []
             if edited_rows["USECASE_NAME"].eq("").any():
-                usecase_errors.append("Use Case Name cannot be empty.")
+                errors.append("Use Case Name cannot be empty.")
             if (
                 edited_rows["USECASE_WEIGHT"].isna().any()
                 or (~edited_rows["USECASE_WEIGHT"].between(1, 10)).any()
             ):
-                usecase_errors.append("Every Use Case Weight must be between 1 and 10.")
+                errors.append("Every Use Case Weight must be between 1 and 10.")
 
-            if usecase_errors:
-                for error_message in usecase_errors:
-                    st.error(error_message)
+            if errors:
+                for message in errors:
+                    st.error(message)
             else:
                 remove_ids = set(
-                    edited_rows.loc[edited_rows["REMOVE"] == True, "USECASE_ID"].astype(str)
+                    edited_rows.loc[
+                        edited_rows["REMOVE"] == True, "USECASE_ID"
+                    ].astype(str)
                 )
                 kept_usecases_df = edited_rows[
                     edited_rows["REMOVE"] != True
@@ -1502,12 +1558,14 @@ def render_usecases() -> None:
 
                 if st.session_state.selected_usecase_id in remove_ids:
                     remaining_ids = st.session_state.usecases_df["USECASE_ID"].tolist()
-                    st.session_state.selected_usecase_id = remaining_ids[0] if remaining_ids else None
+                    st.session_state.selected_usecase_id = (
+                        remaining_ids[0] if remaining_ids else None
+                    )
 
                 next_ui_revision()
                 st.rerun()
 
-    with st.expander("Add a New Use Case", expanded=usecase_summary_df.empty):
+    with st.expander("Add Use Case", expanded=usecase_summary_df.empty):
         next_usecase_id = generate_next_usecase_id(
             st.session_state.active_domain_id,
             st.session_state.usecases_df,
@@ -1516,38 +1574,42 @@ def render_usecases() -> None:
         with st.form(
             key="new_usecase_form_" + str(st.session_state.new_usecase_form_revision)
         ):
-            new_uc_col_1, new_uc_col_2, new_uc_col_3 = st.columns([1, 2, 1])
-            with new_uc_col_1:
+            form_col_1, form_col_2, form_col_3 = st.columns([1, 2, 1])
+            with form_col_1:
                 st.text_input("Use Case ID", value=next_usecase_id, disabled=True)
-            with new_uc_col_2:
-                new_usecase_name = st.text_input(
-                    "Use Case Name", placeholder="Example: Members"
-                )
-            with new_uc_col_3:
+            with form_col_2:
+                new_usecase_name = st.text_input("Use Case Name")
+            with form_col_3:
                 new_usecase_weight = st.number_input(
-                    "Use Case Weight", min_value=1, max_value=10,
-                    value=5, step=1
+                    "Weight",
+                    min_value=1,
+                    max_value=10,
+                    value=5,
+                    step=1,
+                    help="Relative importance inside this Domain.",
                 )
 
-            create_usecase_button = st.form_submit_button(
+            create_button = st.form_submit_button(
                 "Add Use Case", type="primary", use_container_width=True
             )
 
-        if create_usecase_button:
+        if create_button:
             if not new_usecase_name.strip():
                 st.error("Enter a Use Case Name.")
             else:
-                new_usecase_row = pd.DataFrame(
-                    [{
-                        "USECASE_ID": next_usecase_id,
-                        "USECASE_NAME": new_usecase_name.strip(),
-                        "USECASE_WEIGHT": int(new_usecase_weight),
-                    }],
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            "USECASE_ID": next_usecase_id,
+                            "USECASE_NAME": new_usecase_name.strip(),
+                            "USECASE_WEIGHT": int(new_usecase_weight),
+                        }
+                    ],
                     columns=USECASE_COLUMNS,
                 )
                 st.session_state.usecases_df = normalize_usecases(
                     pd.concat(
-                        [st.session_state.usecases_df, new_usecase_row],
+                        [st.session_state.usecases_df, new_row],
                         ignore_index=True,
                     )
                 )
@@ -1558,17 +1620,15 @@ def render_usecases() -> None:
 
 
 def render_dsids() -> None:
-    st.subheader("DSID Weights")
-    st.caption(
-        "Choose a Use Case and Job. Edit already configured DSIDs in one tab, "
-        "or add new DSIDs from the available list in the other tab."
-    )
+    render_context_header("DSID Configuration")
 
     usecases_df = normalize_usecases(st.session_state.usecases_df)
     tests_df = normalize_tests(st.session_state.tests_df)
 
     if usecases_df.empty:
         st.info("Create a Use Case before adding DSIDs.")
+        if st.button("Go to Use Cases", type="primary"):
+            go_to("usecases")
         return
 
     usecase_ids = usecases_df["USECASE_ID"].tolist()
@@ -1600,7 +1660,7 @@ def render_dsids() -> None:
             "Job",
             options=valid_job_ids,
             index=None,
-            placeholder="Select a job",
+            placeholder="Select a Job",
             format_func=lambda value: (
                 f"{job_name_by_id.get(clean_text(value), '')} "
                 f"({clean_text(value)})"
@@ -1608,51 +1668,30 @@ def render_dsids() -> None:
             key="selected_job_id",
         )
 
-    selected_usecase_summary = build_usecase_summary(usecases_df, tests_df)
-    selected_summary_row = selected_usecase_summary[
-        selected_usecase_summary["USECASE_ID"] == clean_text(selected_usecase_id)
-    ].iloc[0]
-
-    metric_1, metric_2, metric_3 = st.columns(3)
-    with metric_1:
-        st.metric("Use Case Weight", int(selected_summary_row["USECASE_WEIGHT"]))
-    with metric_2:
-        st.metric("Domain Influence", f"{selected_summary_row['DOMAIN_INFLUENCE_PCT']:.1f}%")
-    with metric_3:
-        st.metric("Configured DSIDs", int(selected_summary_row["DSID_COUNT"]))
-
-    st.markdown(
-        """
-        <div class="weight-box">
-            <b>DSID Weight</b> controls influence inside the selected Use Case.
-            Example: weights 10, 5, and 5 become approximately 50%, 25%, and 25%.
-            <b>Critical</b> is a separate business flag and does not currently change
-            the weighted score by itself.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     if not selected_job_id:
-        st.info("Select a Job to view configured and available DSIDs.")
         return
 
     try:
-        source_tests_df = load_tests_for_job(selected_job_id).copy()
-        source_tests_df["JOBID"] = source_tests_df["JOBID"].astype(str).str.strip()
-        source_tests_df["DSID"] = source_tests_df["DSID"].astype(str).str.strip()
-        source_tests_df["TESTCASEDESCRIPTION"] = (
-            source_tests_df["TESTCASEDESCRIPTION"].fillna("").astype(str).str.strip()
-        )
+        source_tests_df = load_tests_for_job(clean_text(selected_job_id))
     except Exception as error:
-        st.error("Unable to load DSIDs from DSE_TESTPLAN.")
+        st.error("Unable to load DSIDs for this Job.")
         st.exception(error)
         return
 
+    source_tests_df = source_tests_df.copy()
+    if not source_tests_df.empty:
+        source_tests_df["JOBID"] = source_tests_df["JOBID"].astype(str).str.strip()
+        source_tests_df["DSID"] = source_tests_df["DSID"].astype(str).str.strip()
+        source_tests_df["TESTCASEDESCRIPTION"] = (
+            source_tests_df["TESTCASEDESCRIPTION"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
     if source_tests_df.empty:
-        st.warning(f"No DSIDs were found in DSE_TESTPLAN for Job ID '{selected_job_id}'.")
-        with st.expander("Troubleshooting details", expanded=False):
-            st.code(f"Selected JOBID: {selected_job_id}", language="text")
+        st.warning("No DSIDs were found for this Job in DSE_TESTPLAN.")
+        with st.expander("Job ID diagnostics"):
             try:
                 st.dataframe(
                     load_testplan_jobid_samples(),
@@ -1663,30 +1702,27 @@ def render_dsids() -> None:
                 st.exception(error)
         return
 
-    configured_tab, available_tab = st.tabs([
-        "Configured DSIDs",
-        "Add New DSIDs",
-    ])
+    configured_tab, add_tab = st.tabs(["Configured DSIDs", "Add DSIDs"])
 
     current_scope_mask = (
         (tests_df["USECASE_ID"] == clean_text(selected_usecase_id))
         & (tests_df["JOBID"] == clean_text(selected_job_id))
     )
-    configured_for_selection_df = tests_df[current_scope_mask].copy()
+    configured_df = tests_df[current_scope_mask].copy()
 
     with configured_tab:
-        if configured_for_selection_df.empty:
-            st.info("No DSIDs from this Job are configured in the selected Use Case.")
+        if configured_df.empty:
+            st.info("No DSIDs configured for this Use Case and Job.")
         else:
-            configured_editor_df = add_dsid_influence(
-                configured_for_selection_df,
+            editor_df = add_dsid_influence(
+                configured_df,
                 tests_df,
                 clean_text(selected_usecase_id),
             )
-            configured_editor_df.insert(0, "REMOVE", False)
+            editor_df.insert(0, "REMOVE", False)
 
-            edited_configured_df = st.data_editor(
-                configured_editor_df,
+            edited_df = st.data_editor(
+                editor_df,
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
@@ -1708,16 +1744,29 @@ def render_dsids() -> None:
                     "USECASE_ID",
                 ],
                 column_config={
-                    "REMOVE": st.column_config.CheckboxColumn("Remove", default=False, width="small"),
+                    "REMOVE": st.column_config.CheckboxColumn(
+                        "Remove", default=False, width="small"
+                    ),
                     "DSID_WEIGHT": st.column_config.NumberColumn(
-                        "DSID Weight", min_value=1, max_value=10, step=1,
-                        required=True, width="small"
+                        "Weight",
+                        min_value=1,
+                        max_value=10,
+                        step=1,
+                        required=True,
+                        width="small",
+                        help="Relative importance inside this Use Case.",
                     ),
                     "USECASE_INFLUENCE_PCT": st.column_config.NumberColumn(
-                        "Use Case Influence %", format="%.1f%%", width="small"
+                        "Influence %",
+                        format="%.1f%%",
+                        width="small",
+                        help="Calculated from all DSID weights in this Use Case.",
                     ),
                     "CRITICAL": st.column_config.CheckboxColumn(
-                        "Critical", default=False, width="small"
+                        "Critical",
+                        default=False,
+                        width="small",
+                        help="Use only when this test failure must be treated as business critical.",
                     ),
                     "DSID": st.column_config.TextColumn("DSID", width="medium"),
                     "TESTCASEDESCRIPTION": st.column_config.TextColumn(
@@ -1733,49 +1782,51 @@ def render_dsids() -> None:
             )
 
             if st.button(
-                "Apply DSID Changes",
+                "Apply Changes",
                 type="primary",
                 use_container_width=True,
                 key="apply_configured_dsid_changes",
             ):
-                edited_configured_df["DSID_WEIGHT"] = pd.to_numeric(
-                    edited_configured_df["DSID_WEIGHT"], errors="coerce"
+                edited_df["DSID_WEIGHT"] = pd.to_numeric(
+                    edited_df["DSID_WEIGHT"], errors="coerce"
                 )
                 if (
-                    edited_configured_df["DSID_WEIGHT"].isna().any()
-                    or (~edited_configured_df["DSID_WEIGHT"].between(1, 10)).any()
+                    edited_df["DSID_WEIGHT"].isna().any()
+                    or (~edited_df["DSID_WEIGHT"].between(1, 10)).any()
                 ):
                     st.error("Every DSID Weight must be between 1 and 10.")
                 else:
-                    kept_scope_df = edited_configured_df[
-                        edited_configured_df["REMOVE"] != True
+                    kept_scope_df = edited_df[
+                        edited_df["REMOVE"] != True
                     ][TEST_CONFIG_COLUMNS].copy()
-                    kept_scope_df["DSID_WEIGHT"] = kept_scope_df["DSID_WEIGHT"].astype(int)
+                    kept_scope_df["DSID_WEIGHT"] = kept_scope_df[
+                        "DSID_WEIGHT"
+                    ].astype(int)
                     outside_scope_df = tests_df[~current_scope_mask].copy()
                     st.session_state.tests_df = normalize_tests(
-                        pd.concat([outside_scope_df, kept_scope_df], ignore_index=True)
+                        pd.concat(
+                            [outside_scope_df, kept_scope_df],
+                            ignore_index=True,
+                        )
                     )
                     next_ui_revision()
                     st.rerun()
 
-    with available_tab:
-        assigned_to_other_usecase_df = tests_df[
+    with add_tab:
+        assigned_elsewhere_df = tests_df[
             (tests_df["JOBID"] == clean_text(selected_job_id))
             & (tests_df["USECASE_ID"] != clean_text(selected_usecase_id))
         ].copy()
 
-        if not assigned_to_other_usecase_df.empty:
-            assigned_to_other_usecase_df = assigned_to_other_usecase_df.merge(
+        if not assigned_elsewhere_df.empty:
+            assigned_elsewhere_df = assigned_elsewhere_df.merge(
                 usecases_df[["USECASE_ID", "USECASE_NAME"]],
                 on="USECASE_ID",
                 how="left",
             )
-            with st.expander("DSIDs already used by another Use Case", expanded=False):
-                st.caption(
-                    "These DSIDs are excluded from the available list to prevent duplicate scoring."
-                )
+            with st.expander("DSIDs used by another Use Case"):
                 st.dataframe(
-                    assigned_to_other_usecase_df[
+                    assigned_elsewhere_df[
                         [
                             "DSID",
                             "TESTCASEDESCRIPTION",
@@ -1794,34 +1845,32 @@ def render_dsids() -> None:
                 "DSID",
             ].astype(str)
         )
-        available_tests_df = source_tests_df[
+        available_df = source_tests_df[
             ~source_tests_df["DSID"].isin(configured_dsids_for_job)
         ].copy()
 
-        dsid_search = st.text_input(
-            "Search DSID or Test Description",
-            placeholder="Type part of a DSID or description",
+        search_text = st.text_input(
+            "Search",
+            placeholder="DSID or test description",
             key=f"available_dsid_search_{selected_usecase_id}_{selected_job_id}",
-        )
+        ).strip().lower()
 
-        if dsid_search.strip():
-            search_text = dsid_search.strip().lower()
-            available_tests_df = available_tests_df[
-                available_tests_df["DSID"].astype(str).str.lower().str.contains(
+        if search_text:
+            available_df = available_df[
+                available_df["DSID"].astype(str).str.lower().str.contains(
                     search_text, regex=False, na=False
                 )
                 |
-                available_tests_df["TESTCASEDESCRIPTION"].astype(str).str.lower().str.contains(
-                    search_text, regex=False, na=False
-                )
+                available_df["TESTCASEDESCRIPTION"]
+                .astype(str)
+                .str.lower()
+                .str.contains(search_text, regex=False, na=False)
             ].copy()
 
-        if available_tests_df.empty:
-            st.info(
-                "No additional DSIDs are available for this Job, or the search returned no matches."
-            )
+        if available_df.empty:
+            st.info("No additional DSIDs available.")
         else:
-            available_editor_df = available_tests_df.copy()
+            available_editor_df = available_df.copy()
             available_editor_df.insert(0, "SELECTED", False)
             available_editor_df.insert(1, "DSID_WEIGHT", 5)
             available_editor_df.insert(2, "CRITICAL", False)
@@ -1845,11 +1894,20 @@ def render_dsids() -> None:
                         "Select", default=False, width="small"
                     ),
                     "DSID_WEIGHT": st.column_config.NumberColumn(
-                        "DSID Weight", min_value=1, max_value=10, step=1,
-                        default=5, required=True, width="small"
+                        "Weight",
+                        min_value=1,
+                        max_value=10,
+                        step=1,
+                        default=5,
+                        required=True,
+                        width="small",
+                        help="Relative importance inside this Use Case.",
                     ),
                     "CRITICAL": st.column_config.CheckboxColumn(
-                        "Critical", default=False, width="small"
+                        "Critical",
+                        default=False,
+                        width="small",
+                        help="Use only when this test failure must be treated as business critical.",
                     ),
                     "DSID": st.column_config.TextColumn("DSID", width="medium"),
                     "TESTCASEDESCRIPTION": st.column_config.TextColumn(
@@ -1864,13 +1922,9 @@ def render_dsids() -> None:
                 ),
             )
 
-            selected_available_rows = edited_available_df[
+            selected_rows = edited_available_df[
                 edited_available_df["SELECTED"] == True
             ].copy()
-            st.caption(
-                f"{len(selected_available_rows)} new test case"
-                f"{'s' if len(selected_available_rows) != 1 else ''} selected."
-            )
 
             if st.button(
                 "Add Selected DSIDs",
@@ -1878,30 +1932,32 @@ def render_dsids() -> None:
                 use_container_width=True,
                 key="add_selected_dsids",
             ):
-                add_errors: list[str] = []
-                if selected_available_rows.empty:
-                    add_errors.append("Select at least one DSID.")
+                errors: list[str] = []
+                if selected_rows.empty:
+                    errors.append("Select at least one DSID.")
 
-                selected_available_rows["DSID_WEIGHT"] = pd.to_numeric(
-                    selected_available_rows["DSID_WEIGHT"], errors="coerce"
+                selected_rows["DSID_WEIGHT"] = pd.to_numeric(
+                    selected_rows["DSID_WEIGHT"], errors="coerce"
                 )
                 if (
-                    selected_available_rows["DSID_WEIGHT"].isna().any()
-                    or (~selected_available_rows["DSID_WEIGHT"].between(1, 10)).any()
+                    selected_rows["DSID_WEIGHT"].isna().any()
+                    or (~selected_rows["DSID_WEIGHT"].between(1, 10)).any()
                 ):
-                    add_errors.append("Every selected DSID Weight must be between 1 and 10.")
+                    errors.append("Every selected DSID Weight must be between 1 and 10.")
 
-                if add_errors:
-                    for error_message in add_errors:
-                        st.error(error_message)
+                if errors:
+                    for message in errors:
+                        st.error(message)
                 else:
-                    new_test_rows = []
-                    for _, selected_test in selected_available_rows.iterrows():
-                        new_test_rows.append(
+                    new_rows = []
+                    for _, selected_test in selected_rows.iterrows():
+                        new_rows.append(
                             {
                                 "USECASE_ID": clean_text(selected_usecase_id),
                                 "JOBID": clean_text(selected_job_id),
-                                "JOBNAME": job_name_by_id.get(clean_text(selected_job_id), ""),
+                                "JOBNAME": job_name_by_id.get(
+                                    clean_text(selected_job_id), ""
+                                ),
                                 "DSID": clean_text(selected_test["DSID"]),
                                 "TESTCASEDESCRIPTION": clean_text(
                                     selected_test["TESTCASEDESCRIPTION"]
@@ -1915,7 +1971,7 @@ def render_dsids() -> None:
                         pd.concat(
                             [
                                 tests_df,
-                                pd.DataFrame(new_test_rows, columns=TEST_CONFIG_COLUMNS),
+                                pd.DataFrame(new_rows, columns=TEST_CONFIG_COLUMNS),
                             ],
                             ignore_index=True,
                         )
@@ -1924,222 +1980,233 @@ def render_dsids() -> None:
                     st.rerun()
 
 
-# ============================================================
-# HEADER AND DOMAIN SELECTION
-# ============================================================
-# ============================================================
-# HEADER, SELECTION AND TAB NAVIGATION
-# ============================================================
+def render_analysis() -> None:
+    render_context_header("Health Analysis")
 
-st.markdown(
-    """
-    <div class="app-header">
-        <div class="app-title">Health Configuration</div>
-        <div class="app-subtitle">
-            Select a Health Area and Domain, open the configuration, and use the tabs below.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.sidebar:
-    st.header("Utilities")
-    if st.button("Refresh Source Data", use_container_width=True):
-        load_health_domains.clear()
-        load_jobs.clear()
-        load_tests_for_job.clear()
-        load_testplan_jobid_samples.clear()
-        load_saved_configuration_rows.clear()
-        st.rerun()
-
-    if st.session_state.active_domain_id:
-        if st.button("Close Current Configuration", use_container_width=True):
-            st.session_state.usecases_df = empty_usecases_dataframe()
-            st.session_state.tests_df = empty_tests_dataframe()
-            st.session_state.active_health_area_id = None
-            st.session_state.active_health_area_name = ""
-            st.session_state.active_domain_id = None
-            st.session_state.active_domain_name = ""
-            st.session_state.domain_weight = 5
-            st.session_state.selected_usecase_id = None
-            st.session_state.selected_job_id = None
-            next_ui_revision()
-            st.rerun()
-
-    st.caption(f"Environment ID: {ENVIRONMENT_ID}")
-    st.caption(f"Page loaded: {datetime.now():%Y-%m-%d %H:%M}")
-
-health_area_options_df = (
-    health_domains_df[["HEALTH_AREA_ID", "HEALTH_AREA_NAME"]]
-    .drop_duplicates()
-    .sort_values("HEALTH_AREA_NAME")
-)
-health_area_ids = health_area_options_df["HEALTH_AREA_ID"].tolist()
-health_area_name_by_id = {
-    clean_text(row["HEALTH_AREA_ID"]): clean_text(row["HEALTH_AREA_NAME"])
-    for _, row in health_area_options_df.iterrows()
-}
-
-selector_col_1, selector_col_2, selector_col_3 = st.columns([1.2, 1.4, 0.8])
-with selector_col_1:
-    selected_health_area_id = st.selectbox(
-        "Health Area",
-        options=health_area_ids,
-        index=None,
-        placeholder="Select Health Area",
-        format_func=lambda value: health_area_name_by_id.get(clean_text(value), ""),
-        key="health_area_selector",
-    )
-
-current_selector_area = clean_text(selected_health_area_id)
-if st.session_state.last_selector_health_area_id != current_selector_area:
-    st.session_state.last_selector_health_area_id = current_selector_area
-    st.session_state.domain_selector = None
-
-if selected_health_area_id:
-    selected_area_domains_df = health_domains_df[
-        health_domains_df["HEALTH_AREA_ID"] == clean_text(selected_health_area_id)
-    ].copy()
-else:
-    selected_area_domains_df = pd.DataFrame()
-
-selected_domain_ids = (
-    selected_area_domains_df["DOMAIN_ID"].tolist()
-    if not selected_area_domains_df.empty else []
-)
-domain_name_by_id = {
-    clean_text(row["DOMAIN_ID"]): clean_text(row["DOMAIN_NAME"])
-    for _, row in selected_area_domains_df.iterrows()
-}
-
-with selector_col_2:
-    selected_domain_id = st.selectbox(
-        "Domain",
-        options=selected_domain_ids,
-        index=None,
-        placeholder="Select Domain",
-        disabled=not selected_health_area_id,
-        format_func=lambda value: domain_name_by_id.get(clean_text(value), ""),
-        key="domain_selector",
-    )
-
-with selector_col_3:
-    st.text_input(
-        "Domain ID",
-        value=clean_text(selected_domain_id),
-        disabled=True,
-        placeholder="—",
-    )
-
-selected_health_area_name = (
-    health_area_name_by_id.get(clean_text(selected_health_area_id), "")
-    if selected_health_area_id else ""
-)
-selected_domain_name = (
-    domain_name_by_id.get(clean_text(selected_domain_id), "")
-    if selected_domain_id else ""
-)
-
-open_col, new_col, spacer_col = st.columns([1.1, 1.0, 4.2])
-with open_col:
-    load_existing_button = st.button(
-        "Open Configuration",
-        type="primary",
-        use_container_width=True,
-        disabled=not selected_health_area_id or not selected_domain_id,
-        help="Load the saved configuration for the selected Domain.",
-    )
-with new_col:
-    start_new_button = st.button(
-        "Create New",
-        use_container_width=True,
-        disabled=not selected_health_area_id or not selected_domain_id,
-        help="Start a blank configuration for the selected Domain.",
-    )
-
-if load_existing_button:
     try:
-        with st.spinner("Opening configuration..."):
-            existing_domain_weight, existing_usecases_df, existing_tests_df = (
-                load_existing_configuration(
-                    clean_text(selected_health_area_id),
-                    clean_text(selected_domain_id),
-                )
-            )
-        st.session_state.usecases_df = existing_usecases_df
-        st.session_state.tests_df = existing_tests_df
-        st.session_state.active_health_area_id = clean_text(selected_health_area_id)
-        st.session_state.active_health_area_name = selected_health_area_name
-        st.session_state.active_domain_id = clean_text(selected_domain_id)
-        st.session_state.active_domain_name = selected_domain_name
-        st.session_state.domain_weight = int(existing_domain_weight)
-        st.session_state.selected_usecase_id = (
-            existing_usecases_df.iloc[0]["USECASE_ID"]
-            if not existing_usecases_df.empty else None
-        )
-        st.session_state.selected_job_id = None
-        next_ui_revision()
-        st.rerun()
+        saved_rows_df = load_saved_configuration_rows()
     except Exception as error:
-        st.error("Unable to open the existing configuration.")
+        st.error("Unable to load saved configurations.")
         st.exception(error)
+        return
 
-if start_new_button:
-    selected_domain_row = selected_area_domains_df[
-        selected_area_domains_df["DOMAIN_ID"] == clean_text(selected_domain_id)
-    ].iloc[0]
-    st.session_state.usecases_df = empty_usecases_dataframe()
-    st.session_state.tests_df = empty_tests_dataframe()
-    st.session_state.active_health_area_id = clean_text(selected_health_area_id)
-    st.session_state.active_health_area_name = selected_health_area_name
-    st.session_state.active_domain_id = clean_text(selected_domain_id)
-    st.session_state.active_domain_name = selected_domain_name
-    st.session_state.domain_weight = int(selected_domain_row.get("DOMAIN_WEIGHT", 5))
-    st.session_state.selected_usecase_id = None
-    st.session_state.selected_job_id = None
-    next_ui_revision()
-    st.rerun()
+    area_overview_df = build_health_area_overview(saved_rows_df)
+    working_counts = working_configuration_counts()
 
-if not st.session_state.active_domain_id:
-    st.info("Select a Health Area and Domain, then open an existing configuration or create a new one.")
-    st.stop()
-
-if (
-    selected_domain_id
-    and clean_text(selected_domain_id) != clean_text(st.session_state.active_domain_id)
-):
-    st.warning(
-        "A different Domain is currently open. Click Open Configuration or Create New to switch."
+    configured_domains = (
+        int((area_overview_df["STATUS"] != "Not configured").sum())
+        if not area_overview_df.empty
+        else 0
     )
 
-working_counts = working_configuration_counts()
-st.markdown(
-    f"""
-    <div class="active-card">
-        <div class="active-title">
-            {st.session_state.active_health_area_name} &nbsp;›&nbsp;
-            {st.session_state.active_domain_name}
-        </div>
-        <div class="active-subtitle">
-            {working_counts['USECASE_COUNT']} Use Cases &nbsp;•&nbsp;
-            {working_counts['JOB_COUNT']} Jobs &nbsp;•&nbsp;
-            {working_counts['DSID_COUNT']} DSIDs
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    with metric_1:
+        st.metric("Domains", len(area_overview_df))
+    with metric_2:
+        st.metric("Configured", configured_domains)
+    with metric_3:
+        st.metric(
+            "Use Cases",
+            int(area_overview_df["USECASE_COUNT"].sum())
+            if not area_overview_df.empty
+            else 0,
+        )
+    with metric_4:
+        st.metric(
+            "DSIDs",
+            int(area_overview_df["DSID_COUNT"].sum())
+            if not area_overview_df.empty
+            else 0,
+        )
 
-summary_tab, usecase_tab, dsid_tab = st.tabs(
-    ["Overview & Save", "Use Cases", "DSID Weights"]
-)
+    st.dataframe(
+        area_overview_df,
+        use_container_width=True,
+        hide_index=True,
+        column_order=[
+            "DOMAIN_NAME",
+            "STATUS",
+            "DOMAIN_WEIGHT",
+            "HEALTH_AREA_INFLUENCE_PCT",
+            "USECASE_COUNT",
+            "JOB_COUNT",
+            "DSID_COUNT",
+            "CRITICAL_COUNT",
+        ],
+        column_config={
+            "DOMAIN_NAME": st.column_config.TextColumn("Domain", width="medium"),
+            "STATUS": st.column_config.TextColumn("Status", width="small"),
+            "DOMAIN_WEIGHT": st.column_config.NumberColumn(
+                "Weight",
+                width="small",
+                help="Relative importance inside the Health Area.",
+            ),
+            "HEALTH_AREA_INFLUENCE_PCT": st.column_config.NumberColumn(
+                "Influence %",
+                format="%.1f%%",
+                width="small",
+                help="Calculated from all Domain weights in the Health Area.",
+            ),
+            "USECASE_COUNT": st.column_config.NumberColumn("Use Cases", width="small"),
+            "JOB_COUNT": st.column_config.NumberColumn("Jobs", width="small"),
+            "DSID_COUNT": st.column_config.NumberColumn("DSIDs", width="small"),
+            "CRITICAL_COUNT": st.column_config.NumberColumn("Critical", width="small"),
+        },
+    )
 
-with summary_tab:
-    render_analysis()
+    st.markdown("### Selected Domain")
+    selected_domain_share = 0.0
+    if not area_overview_df.empty:
+        selected_row = area_overview_df[
+            area_overview_df["DOMAIN_ID"]
+            == clean_text(st.session_state.active_domain_id)
+        ]
+        if not selected_row.empty:
+            selected_domain_share = float(
+                selected_row.iloc[0]["HEALTH_AREA_INFLUENCE_PCT"]
+            )
 
-with usecase_tab:
+    selected_1, selected_2, selected_3, selected_4, selected_5 = st.columns(5)
+    with selected_1:
+        st.metric("Domain Weight", int(st.session_state.domain_weight))
+    with selected_2:
+        st.metric("Influence", f"{selected_domain_share:.1f}%")
+    with selected_3:
+        st.metric("Use Cases", working_counts["USECASE_COUNT"])
+    with selected_4:
+        st.metric("Jobs", working_counts["JOB_COUNT"])
+    with selected_5:
+        st.metric("DSIDs", working_counts["DSID_COUNT"])
+
+    usecases_df = normalize_usecases(st.session_state.usecases_df)
+    tests_df = normalize_tests(st.session_state.tests_df)
+    usecase_summary_df = build_usecase_summary(usecases_df, tests_df)
+    review_df = build_review_dataframe(usecases_df, tests_df)
+
+    if not usecase_summary_df.empty:
+        table_col, chart_col = st.columns([3, 2])
+        with table_col:
+            st.dataframe(
+                usecase_summary_df,
+                use_container_width=True,
+                hide_index=True,
+                column_order=[
+                    "USECASE_NAME",
+                    "USECASE_WEIGHT",
+                    "DOMAIN_INFLUENCE_PCT",
+                    "JOB_COUNT",
+                    "DSID_COUNT",
+                    "CRITICAL_COUNT",
+                ],
+                column_config={
+                    "USECASE_NAME": "Use Case",
+                    "USECASE_WEIGHT": st.column_config.NumberColumn(
+                        "Weight", width="small"
+                    ),
+                    "DOMAIN_INFLUENCE_PCT": st.column_config.NumberColumn(
+                        "Influence %", format="%.1f%%", width="small"
+                    ),
+                    "JOB_COUNT": "Jobs",
+                    "DSID_COUNT": "DSIDs",
+                    "CRITICAL_COUNT": "Critical",
+                },
+            )
+        with chart_col:
+            st.bar_chart(
+                usecase_summary_df[
+                    ["USECASE_NAME", "DOMAIN_INFLUENCE_PCT"]
+                ].set_index("USECASE_NAME"),
+                use_container_width=True,
+            )
+
+    if not review_df.empty:
+        with st.expander("DSID Details"):
+            st.dataframe(
+                review_df,
+                use_container_width=True,
+                hide_index=True,
+                column_order=[
+                    "USECASE_NAME",
+                    "JOBNAME",
+                    "DSID",
+                    "TESTCASEDESCRIPTION",
+                    "DSID_WEIGHT",
+                    "DSID_INFLUENCE_PCT",
+                    "CRITICAL",
+                ],
+                column_config={
+                    "USECASE_NAME": "Use Case",
+                    "JOBNAME": "Job",
+                    "DSID": "DSID",
+                    "TESTCASEDESCRIPTION": st.column_config.TextColumn(
+                        "Test Case Description", width="large"
+                    ),
+                    "DSID_WEIGHT": st.column_config.NumberColumn(
+                        "Weight", width="small"
+                    ),
+                    "DSID_INFLUENCE_PCT": st.column_config.NumberColumn(
+                        "Influence %", format="%.1f%%", width="small"
+                    ),
+                    "CRITICAL": st.column_config.CheckboxColumn("Critical"),
+                },
+            )
+
+    validation_errors = validate_configuration(
+        int(st.session_state.domain_weight),
+        usecases_df,
+        tests_df,
+    )
+
+    st.divider()
+    if validation_errors:
+        for message in validation_errors:
+            st.warning(message)
+    else:
+        associated_jobs = build_associated_jobs_json(
+            int(st.session_state.domain_weight),
+            usecases_df,
+            tests_df,
+        )
+
+        if st.button(
+            "Save Configuration",
+            type="primary",
+            use_container_width=True,
+            key="save_configuration",
+        ):
+            try:
+                with st.spinner("Saving..."):
+                    save_configuration(
+                        health_area_id=clean_text(
+                            st.session_state.active_health_area_id
+                        ),
+                        health_area_name=clean_text(
+                            st.session_state.active_health_area_name
+                        ),
+                        domain_id=clean_text(st.session_state.active_domain_id),
+                        domain_name=clean_text(st.session_state.active_domain_name),
+                        associated_jobs=associated_jobs,
+                    )
+                load_health_domains.clear()
+                load_saved_configuration_rows.clear()
+                st.success("Configuration saved.")
+            except Exception as error:
+                st.error("Unable to save the configuration.")
+                st.exception(error)
+
+
+# ============================================================
+# ROUTER
+# ============================================================
+
+if st.session_state.active_view != "home" and not st.session_state.active_domain_id:
+    st.session_state.active_view = "home"
+
+if st.session_state.active_view == "usecases":
     render_usecases()
-
-with dsid_tab:
+elif st.session_state.active_view == "dsids":
     render_dsids()
+elif st.session_state.active_view == "analysis":
+    render_analysis()
+else:
+    render_home()

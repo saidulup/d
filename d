@@ -1,4 +1,6 @@
-WITH CONFIGURATION AS
+CREATE OR REPLACE VIEW HEALTH_METRICS_DETAIL AS
+
+WITH DOMAIN_CONFIGURATION AS
 (
     SELECT
         DSE_HEALTH_DOMAIN.HEALTH_AREA_ID,
@@ -7,84 +9,353 @@ WITH CONFIGURATION AS
         DSE_HEALTH_DOMAIN.DOMAIN_NAME,
 
         COALESCE(
-            TRY_TO_NUMBER(
-                TO_VARCHAR(
-                    DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:domain_weight
-                )
-            ),
+            DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:domain_weight::NUMBER,
             1
         ) AS DOMAIN_WEIGHT,
 
-        COALESCE(
-            TO_VARCHAR(
-                USECASE_CONFIG.VALUE:usecase_id
-            ),
-            ''
-        ) AS USECASE_ID,
+        USECASE_JSON.VALUE:usecase_id::VARCHAR
+            AS USECASE_ID,
+
+        USECASE_JSON.VALUE:usecase_name::VARCHAR
+            AS USECASE_NAME,
 
         COALESCE(
-            TO_VARCHAR(
-                USECASE_CONFIG.VALUE:usecase_name
-            ),
-            ''
-        ) AS USECASE_NAME,
-
-        COALESCE(
-            TRY_TO_NUMBER(
-                TO_VARCHAR(
-                    USECASE_CONFIG.VALUE:usecase_weight
-                )
-            ),
+            USECASE_JSON.VALUE:usecase_weight::NUMBER,
             1
         ) AS USECASE_WEIGHT,
 
-        TRY_TO_NUMBER(
-            TO_VARCHAR(
-                JOB_CONFIG.VALUE:jobid
-            )
-        ) AS JOBID,
+        JOB_JSON.VALUE:jobid::NUMBER
+            AS JOBID,
+
+        TEST_JSON.VALUE:dsid::VARCHAR
+            AS DSID,
 
         COALESCE(
-            TO_VARCHAR(
-                TEST_CONFIG.VALUE:dsid
-            ),
-            ''
-        ) AS DSID,
-
-        COALESCE(
-            TRY_TO_NUMBER(
-                TO_VARCHAR(
-                    TEST_CONFIG.VALUE:weight
-                )
-            ),
+            TEST_JSON.VALUE:weight::NUMBER,
             1
-        ) AS DSID_WEIGHT,
-
-        COALESCE(
-            TRY_TO_BOOLEAN(
-                TO_VARCHAR(
-                    TEST_CONFIG.VALUE:critical
-                )
-            ),
-            FALSE
-        ) AS CRITICAL_IND
+        ) AS DSID_WEIGHT
 
     FROM DSE_HEALTH_DOMAIN
 
-    CROSS JOIN LATERAL FLATTEN
+    , LATERAL FLATTEN
     (
-        INPUT => DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:usecases
-    ) USECASE_CONFIG
+        INPUT => DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:usecases,
+        OUTER => TRUE
+    ) USECASE_JSON
 
-    CROSS JOIN LATERAL FLATTEN
+    , LATERAL FLATTEN
     (
-        INPUT => USECASE_CONFIG.VALUE:jobs
-    ) JOB_CONFIG
+        INPUT => USECASE_JSON.VALUE:jobs,
+        OUTER => TRUE
+    ) JOB_JSON
 
-    CROSS JOIN LATERAL FLATTEN
+    , LATERAL FLATTEN
     (
-        INPUT => JOB_CONFIG.VALUE:tests
-    ) TEST_CONFIG
+        INPUT => JOB_JSON.VALUE:tests,
+        OUTER => TRUE
+    ) TEST_JSON
+),
 
-    WHERE DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS IS NOT NULL
+DOMAIN_CONFIGURATION_WITH_JOB AS
+(
+    SELECT
+        DOMAIN_CONFIGURATION.HEALTH_AREA_ID,
+        DOMAIN_CONFIGURATION.HEALTH_AREA_NAME,
+        DOMAIN_CONFIGURATION.DOMAIN_ID,
+        DOMAIN_CONFIGURATION.DOMAIN_NAME,
+        DOMAIN_CONFIGURATION.DOMAIN_WEIGHT,
+        DOMAIN_CONFIGURATION.USECASE_ID,
+        DOMAIN_CONFIGURATION.USECASE_NAME,
+        DOMAIN_CONFIGURATION.USECASE_WEIGHT,
+        DOMAIN_CONFIGURATION.JOBID,
+        DSE_JOB_CONFIG.JOBNAME,
+        DOMAIN_CONFIGURATION.DSID,
+        DOMAIN_CONFIGURATION.DSID_WEIGHT
+
+    FROM DOMAIN_CONFIGURATION
+
+    LEFT JOIN DSE_JOB_CONFIG
+        ON DOMAIN_CONFIGURATION.JOBID =
+           DSE_JOB_CONFIG.JOBID
+
+       AND DSE_JOB_CONFIG.ENVIRONMENTID = 1
+),
+
+LATEST_JOB_RUN AS
+(
+    SELECT
+        DSE_TESTRESULTS.JOBNAME,
+        MAX(DSE_TESTRESULTS.RUNID) AS RUNID
+
+    FROM DSE_TESTRESULTS
+
+    WHERE DSE_TESTRESULTS.ENVIRONMENTID = 1
+      AND COALESCE(DSE_TESTRESULTS.ACTIV_IND, 'Y') = 'Y'
+
+    GROUP BY
+        DSE_TESTRESULTS.JOBNAME
+),
+
+LATEST_TEST_RESULTS AS
+(
+    SELECT
+        DSE_TESTRESULTS.DSID::VARCHAR AS DSID,
+        DSE_TESTRESULTS.JOBNAME,
+        DSE_TESTRESULTS.TESTSTATUS,
+        DSE_TESTRESULTS.TESTCASEDESCRIPTION,
+        DSE_TESTRESULTS.METRICRESULTS,
+        DSE_TESTRESULTS.RUNDATE,
+        DSE_TESTRESULTS.RUNID
+
+    FROM DSE_TESTRESULTS
+
+    INNER JOIN LATEST_JOB_RUN
+        ON DSE_TESTRESULTS.JOBNAME =
+           LATEST_JOB_RUN.JOBNAME
+
+       AND DSE_TESTRESULTS.RUNID =
+           LATEST_JOB_RUN.RUNID
+
+    WHERE DSE_TESTRESULTS.ENVIRONMENTID = 1
+      AND COALESCE(DSE_TESTRESULTS.ACTIV_IND, 'Y') = 'Y'
+
+    QUALIFY ROW_NUMBER() OVER
+    (
+        PARTITION BY
+            DSE_TESTRESULTS.JOBNAME,
+            DSE_TESTRESULTS.DSID
+
+        ORDER BY
+            DSE_TESTRESULTS.RUNDATE DESC NULLS LAST
+    ) = 1
+),
+
+DSID_RESULTS AS
+(
+    SELECT
+        DOMAIN_CONFIGURATION_WITH_JOB.HEALTH_AREA_ID,
+        DOMAIN_CONFIGURATION_WITH_JOB.HEALTH_AREA_NAME,
+        DOMAIN_CONFIGURATION_WITH_JOB.DOMAIN_ID,
+        DOMAIN_CONFIGURATION_WITH_JOB.DOMAIN_NAME,
+        DOMAIN_CONFIGURATION_WITH_JOB.DOMAIN_WEIGHT,
+        DOMAIN_CONFIGURATION_WITH_JOB.USECASE_ID,
+        DOMAIN_CONFIGURATION_WITH_JOB.USECASE_NAME,
+        DOMAIN_CONFIGURATION_WITH_JOB.USECASE_WEIGHT,
+        DOMAIN_CONFIGURATION_WITH_JOB.JOBID,
+        DOMAIN_CONFIGURATION_WITH_JOB.JOBNAME,
+        DOMAIN_CONFIGURATION_WITH_JOB.DSID,
+        DOMAIN_CONFIGURATION_WITH_JOB.DSID_WEIGHT,
+
+        COALESCE(
+            LATEST_TEST_RESULTS.TESTSTATUS,
+            'NO_DATA'
+        ) AS TESTSTATUS,
+
+        CASE
+            WHEN UPPER(
+                COALESCE(
+                    LATEST_TEST_RESULTS.TESTSTATUS,
+                    'NO_DATA'
+                )
+            ) IN
+            (
+                'PASS',
+                'PASSED',
+                'SUCCESS',
+                'SUCCESSFUL'
+            )
+                THEN 100
+
+            WHEN UPPER(
+                COALESCE(
+                    LATEST_TEST_RESULTS.TESTSTATUS,
+                    'NO_DATA'
+                )
+            ) IN
+            (
+                'WARN',
+                'WARNING'
+            )
+                THEN 50
+
+            WHEN UPPER(
+                COALESCE(
+                    LATEST_TEST_RESULTS.TESTSTATUS,
+                    'NO_DATA'
+                )
+            ) IN
+            (
+                'FAIL',
+                'FAILED',
+                'ERROR',
+                'NO_DATA'
+            )
+                THEN 0
+
+            ELSE 0
+        END AS DSID_SCORE,
+
+        LATEST_TEST_RESULTS.TESTCASEDESCRIPTION,
+        LATEST_TEST_RESULTS.METRICRESULTS,
+        LATEST_TEST_RESULTS.RUNDATE
+
+    FROM DOMAIN_CONFIGURATION_WITH_JOB
+
+    LEFT JOIN LATEST_TEST_RESULTS
+        ON DOMAIN_CONFIGURATION_WITH_JOB.JOBNAME =
+           LATEST_TEST_RESULTS.JOBNAME
+
+       AND DOMAIN_CONFIGURATION_WITH_JOB.DSID =
+           LATEST_TEST_RESULTS.DSID
+),
+
+DSID_WITH_USECASE_SCORE AS
+(
+    SELECT
+        DSID_RESULTS.*,
+
+        ROUND(
+            DSID_SCORE * DSID_WEIGHT
+            /
+            NULLIF(
+                SUM(DSID_WEIGHT) OVER
+                (
+                    PARTITION BY
+                        HEALTH_AREA_ID,
+                        DOMAIN_ID,
+                        USECASE_ID
+                ),
+                0
+            ),
+            2
+        ) AS WEIGHTED_SCORE,
+
+        ROUND(
+            SUM(DSID_SCORE * DSID_WEIGHT) OVER
+            (
+                PARTITION BY
+                    HEALTH_AREA_ID,
+                    DOMAIN_ID,
+                    USECASE_ID
+            )
+            /
+            NULLIF(
+                SUM(DSID_WEIGHT) OVER
+                (
+                    PARTITION BY
+                        HEALTH_AREA_ID,
+                        DOMAIN_ID,
+                        USECASE_ID
+                ),
+                0
+            ),
+            2
+        ) AS AVERAGE_SCORE
+
+    FROM DSID_RESULTS
+),
+
+USECASE_SCORES AS
+(
+    SELECT DISTINCT
+        HEALTH_AREA_ID,
+        HEALTH_AREA_NAME,
+        DOMAIN_ID,
+        DOMAIN_NAME,
+        DOMAIN_WEIGHT,
+        USECASE_ID,
+        USECASE_NAME,
+        USECASE_WEIGHT,
+        AVERAGE_SCORE
+
+    FROM DSID_WITH_USECASE_SCORE
+),
+
+DOMAIN_SCORES AS
+(
+    SELECT
+        HEALTH_AREA_ID,
+        HEALTH_AREA_NAME,
+        DOMAIN_ID,
+        DOMAIN_NAME,
+        MAX(DOMAIN_WEIGHT) AS DOMAIN_WEIGHT,
+
+        ROUND(
+            SUM(AVERAGE_SCORE * USECASE_WEIGHT)
+            /
+            NULLIF(SUM(USECASE_WEIGHT), 0),
+            2
+        ) AS DOMAIN_SCORE
+
+    FROM USECASE_SCORES
+
+    GROUP BY
+        HEALTH_AREA_ID,
+        HEALTH_AREA_NAME,
+        DOMAIN_ID,
+        DOMAIN_NAME
+),
+
+HEALTH_AREA_SCORES AS
+(
+    SELECT
+        HEALTH_AREA_ID,
+        HEALTH_AREA_NAME,
+
+        ROUND(
+            SUM(DOMAIN_SCORE * DOMAIN_WEIGHT)
+            /
+            NULLIF(SUM(DOMAIN_WEIGHT), 0),
+            2
+        ) AS HEALTH_AREA_SCORE
+
+    FROM DOMAIN_SCORES
+
+    GROUP BY
+        HEALTH_AREA_ID,
+        HEALTH_AREA_NAME
+),
+
+OVERALL_SCORE AS
+(
+    SELECT
+        ROUND(
+            AVG(HEALTH_AREA_SCORE),
+            2
+        ) AS OVERALL_SCORE
+
+    FROM HEALTH_AREA_SCORES
 )
+
+SELECT
+    DSID_WITH_USECASE_SCORE.HEALTH_AREA_ID,
+    DSID_WITH_USECASE_SCORE.HEALTH_AREA_NAME,
+    DSID_WITH_USECASE_SCORE.DOMAIN_ID,
+    DSID_WITH_USECASE_SCORE.DOMAIN_NAME,
+    DSID_WITH_USECASE_SCORE.USECASE_ID,
+    DSID_WITH_USECASE_SCORE.USECASE_NAME,
+    DSID_WITH_USECASE_SCORE.DSID,
+    DSID_WITH_USECASE_SCORE.TESTSTATUS,
+    DSID_WITH_USECASE_SCORE.WEIGHTED_SCORE,
+    DSID_WITH_USECASE_SCORE.AVERAGE_SCORE,
+    DOMAIN_SCORES.DOMAIN_SCORE,
+    HEALTH_AREA_SCORES.HEALTH_AREA_SCORE,
+    OVERALL_SCORE.OVERALL_SCORE,
+    DSID_WITH_USECASE_SCORE.TESTCASEDESCRIPTION,
+    DSID_WITH_USECASE_SCORE.METRICRESULTS,
+    DSID_WITH_USECASE_SCORE.RUNDATE::VARCHAR AS RUNDATE
+
+FROM DSID_WITH_USECASE_SCORE
+
+LEFT JOIN DOMAIN_SCORES
+    ON DSID_WITH_USECASE_SCORE.HEALTH_AREA_ID =
+       DOMAIN_SCORES.HEALTH_AREA_ID
+
+   AND DSID_WITH_USECASE_SCORE.DOMAIN_ID =
+       DOMAIN_SCORES.DOMAIN_ID
+
+LEFT JOIN HEALTH_AREA_SCORES
+    ON DSID_WITH_USECASE_SCORE.HEALTH_AREA_ID =
+       HEALTH_AREA_SCORES.HEALTH_AREA_ID
+
+CROSS JOIN OVERALL_SCORE;

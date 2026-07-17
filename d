@@ -13,7 +13,7 @@ from snowflake.snowpark.context import get_active_session
 # ============================================================
 
 st.set_page_config(
-    page_title="Health Domain Configuration",
+    page_title="Health Configuration",
     page_icon="🩺",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -1143,7 +1143,7 @@ def build_health_area_overview(saved_rows_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_analysis() -> None:
-    st.subheader("Overall Analysis")
+    st.subheader("Configuration Overview")
     st.caption(
         "See the complete configuration coverage and weight influence before saving. "
         "This view uses the current working changes for the selected Domain and saved "
@@ -1355,7 +1355,7 @@ def render_analysis() -> None:
 
 
 def render_usecases() -> None:
-    st.subheader("Use Cases and Weights")
+    st.subheader("Use Case Weights")
     st.caption(
         "Set the Domain importance and manage the Use Cases inside it. "
         "Influence percentages are calculated automatically from the relative weights."
@@ -1558,7 +1558,7 @@ def render_usecases() -> None:
 
 
 def render_dsids() -> None:
-    st.subheader("DSIDs and Test Weights")
+    st.subheader("DSID Weights")
     st.caption(
         "Choose a Use Case and Job. Edit already configured DSIDs in one tab, "
         "or add new DSIDs from the available list in the other tab."
@@ -1927,14 +1927,16 @@ def render_dsids() -> None:
 # ============================================================
 # HEADER AND DOMAIN SELECTION
 # ============================================================
+# ============================================================
+# HEADER, SELECTION AND TAB NAVIGATION
+# ============================================================
 
 st.markdown(
     """
     <div class="app-header">
-        <div class="app-title">Health Configuration Studio</div>
+        <div class="app-title">Health Configuration</div>
         <div class="app-subtitle">
-            Select a Health Area and Domain, then analyze the configuration,
-            manage Use Cases, or manage DSIDs.
+            Select a Health Area and Domain, open the configuration, and use the tabs below.
         </div>
     </div>
     """,
@@ -1950,6 +1952,21 @@ with st.sidebar:
         load_testplan_jobid_samples.clear()
         load_saved_configuration_rows.clear()
         st.rerun()
+
+    if st.session_state.active_domain_id:
+        if st.button("Close Current Configuration", use_container_width=True):
+            st.session_state.usecases_df = empty_usecases_dataframe()
+            st.session_state.tests_df = empty_tests_dataframe()
+            st.session_state.active_health_area_id = None
+            st.session_state.active_health_area_name = ""
+            st.session_state.active_domain_id = None
+            st.session_state.active_domain_name = ""
+            st.session_state.domain_weight = 5
+            st.session_state.selected_usecase_id = None
+            st.session_state.selected_job_id = None
+            next_ui_revision()
+            st.rerun()
+
     st.caption(f"Environment ID: {ENVIRONMENT_ID}")
     st.caption(f"Page loaded: {datetime.now():%Y-%m-%d %H:%M}")
 
@@ -1964,18 +1981,14 @@ health_area_name_by_id = {
     for _, row in health_area_options_df.iterrows()
 }
 
-st.markdown('<div class="selection-card">', unsafe_allow_html=True)
-selector_col_1, selector_col_2 = st.columns(2)
+selector_col_1, selector_col_2, selector_col_3 = st.columns([1.2, 1.4, 0.8])
 with selector_col_1:
     selected_health_area_id = st.selectbox(
         "Health Area",
         options=health_area_ids,
         index=None,
-        placeholder="Select a health area",
-        format_func=lambda value: (
-            f"{health_area_name_by_id.get(clean_text(value), '')} "
-            f"({clean_text(value)})"
-        ),
+        placeholder="Select Health Area",
+        format_func=lambda value: health_area_name_by_id.get(clean_text(value), ""),
         key="health_area_selector",
     )
 
@@ -2005,13 +2018,18 @@ with selector_col_2:
         "Domain",
         options=selected_domain_ids,
         index=None,
-        placeholder="Select a domain",
+        placeholder="Select Domain",
         disabled=not selected_health_area_id,
-        format_func=lambda value: (
-            f"{domain_name_by_id.get(clean_text(value), '')} "
-            f"({clean_text(value)})"
-        ),
+        format_func=lambda value: domain_name_by_id.get(clean_text(value), ""),
         key="domain_selector",
+    )
+
+with selector_col_3:
+    st.text_input(
+        "Domain ID",
+        value=clean_text(selected_domain_id),
+        disabled=True,
+        placeholder="—",
     )
 
 selected_health_area_name = (
@@ -2023,45 +2041,26 @@ selected_domain_name = (
     if selected_domain_id else ""
 )
 
-open_col_1, open_col_2, open_col_3 = st.columns([1.2, 1.2, 1])
-with open_col_1:
+open_col, new_col, spacer_col = st.columns([1.1, 1.0, 4.2])
+with open_col:
     load_existing_button = st.button(
-        "Open Existing Configuration",
+        "Open Configuration",
         type="primary",
         use_container_width=True,
         disabled=not selected_health_area_id or not selected_domain_id,
+        help="Load the saved configuration for the selected Domain.",
     )
-with open_col_2:
+with new_col:
     start_new_button = st.button(
-        "Start Blank Configuration",
+        "Create New",
         use_container_width=True,
         disabled=not selected_health_area_id or not selected_domain_id,
+        help="Start a blank configuration for the selected Domain.",
     )
-with open_col_3:
-    clear_working_button = st.button(
-        "Close",
-        use_container_width=True,
-        disabled=not st.session_state.active_domain_id,
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-if clear_working_button:
-    st.session_state.usecases_df = empty_usecases_dataframe()
-    st.session_state.tests_df = empty_tests_dataframe()
-    st.session_state.active_health_area_id = None
-    st.session_state.active_health_area_name = ""
-    st.session_state.active_domain_id = None
-    st.session_state.active_domain_name = ""
-    st.session_state.domain_weight = 5
-    st.session_state.selected_usecase_id = None
-    st.session_state.selected_job_id = None
-    st.session_state.active_view = "analysis"
-    next_ui_revision()
-    st.rerun()
 
 if load_existing_button:
     try:
-        with st.spinner("Opening existing configuration..."):
+        with st.spinner("Opening configuration..."):
             existing_domain_weight, existing_usecases_df, existing_tests_df = (
                 load_existing_configuration(
                     clean_text(selected_health_area_id),
@@ -2080,7 +2079,6 @@ if load_existing_button:
             if not existing_usecases_df.empty else None
         )
         st.session_state.selected_job_id = None
-        st.session_state.active_view = "analysis"
         next_ui_revision()
         st.rerun()
     except Exception as error:
@@ -2100,15 +2098,11 @@ if start_new_button:
     st.session_state.domain_weight = int(selected_domain_row.get("DOMAIN_WEIGHT", 5))
     st.session_state.selected_usecase_id = None
     st.session_state.selected_job_id = None
-    st.session_state.active_view = "usecases"
     next_ui_revision()
     st.rerun()
 
 if not st.session_state.active_domain_id:
-    st.info(
-        "Choose a Health Area and Domain. Open the saved configuration to analyze or edit it, "
-        "or start a blank configuration."
-    )
+    st.info("Select a Health Area and Domain, then open an existing configuration or create a new one.")
     st.stop()
 
 if (
@@ -2116,8 +2110,7 @@ if (
     and clean_text(selected_domain_id) != clean_text(st.session_state.active_domain_id)
 ):
     st.warning(
-        "The selection above is different from the open working configuration. "
-        "Click Open Existing Configuration or Start Blank Configuration to switch."
+        "A different Domain is currently open. Click Open Configuration or Create New to switch."
     )
 
 working_counts = working_configuration_counts()
@@ -2129,7 +2122,6 @@ st.markdown(
             {st.session_state.active_domain_name}
         </div>
         <div class="active-subtitle">
-            Domain {st.session_state.active_domain_id} &nbsp;•&nbsp;
             {working_counts['USECASE_COUNT']} Use Cases &nbsp;•&nbsp;
             {working_counts['JOB_COUNT']} Jobs &nbsp;•&nbsp;
             {working_counts['DSID_COUNT']} DSIDs
@@ -2139,39 +2131,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-nav_col_1, nav_col_2, nav_col_3 = st.columns(3)
-with nav_col_1:
-    if st.button(
-        "Overall Analysis",
-        type="primary" if st.session_state.active_view == "analysis" else "secondary",
-        use_container_width=True,
-        key="nav_analysis",
-    ):
-        st.session_state.active_view = "analysis"
-        st.rerun()
-with nav_col_2:
-    if st.button(
-        "Use Cases",
-        type="primary" if st.session_state.active_view == "usecases" else "secondary",
-        use_container_width=True,
-        key="nav_usecases",
-    ):
-        st.session_state.active_view = "usecases"
-        st.rerun()
-with nav_col_3:
-    if st.button(
-        "DSIDs",
-        type="primary" if st.session_state.active_view == "dsids" else "secondary",
-        use_container_width=True,
-        key="nav_dsids",
-    ):
-        st.session_state.active_view = "dsids"
-        st.rerun()
+summary_tab, usecase_tab, dsid_tab = st.tabs(
+    ["Overview & Save", "Use Cases", "DSID Weights"]
+)
 
-st.divider()
-if st.session_state.active_view == "analysis":
+with summary_tab:
     render_analysis()
-elif st.session_state.active_view == "usecases":
+
+with usecase_tab:
     render_usecases()
-else:
+
+with dsid_tab:
     render_dsids()

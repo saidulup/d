@@ -1,32 +1,20 @@
-UPDATE DSE_HEALTH_DOMAIN
-SET ASSOCIATED_JOBS = PARSE_JSON(
-'[
-    {
-        "jobid": 124,
-        "dsids": []
-    },
-    {
-        "jobid": 222,
-        "dsids": []
-    },
-    {
-        "jobid": 359,
-        "dsids": [
-            35901,
-            35902,
-            35903,
-            35904,
-            35905,
-            35906,
-            35907,
-            35908,
-            35909,
-            35910,
-            35911,
-            35912
-        ]
-    }
-]'
-)
-WHERE HEALTH_AREA_ID = '2'
-  AND DOMAIN_ID = '201';
+create or replace TABLE HEALTH_METRICS (
+	HEALTH_AREA_ID VARCHAR,
+	HEALTH_AREA_NAME VARCHAR(16777216),
+    DOMAIN_ID VARCHAR,
+	DOMAIN_NAME VARCHAR(16777216),
+    USECASE_ID VARCHAR,
+    USECASE_NAME VARCHAR(16777216),
+    DSID VARCHAR,
+	TESTSTATUS VARCHAR(16777216),
+	WEIGHTED_SCORE NUMBER,
+	AVERAGE_SCORE NUMBER,
+	TESTCASEDESCRIPTION VARCHAR(16777216),
+	METRICRESULTS VARCHAR(16777216),
+	RUNDATE VARCHAR(16777216)
+
+);
+
+select * from DSE_HEALTH_DOMAIN;
+
+select * from dse_testresults;

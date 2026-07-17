@@ -1,132 +1,282 @@
-UPDATE DSE_HEALTH_DOMAIN
-SET ASSOCIATED_JOBS = PARSE_JSON(
-'{
-    "domain_weight": 10,
-    "usecases": [
-        {
-            "usecase_id": "UC201",
-            "usecase_name": "Members",
-            "usecase_weight": 10,
-            "jobs": [
-                {
-                    "jobid": 40102,
-                    "tests": [
-                        {
-                            "dsid": 40102034,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102036,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102037,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102041,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102044,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102024,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102059,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102062,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102065,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102066,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102067,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40102070,
-                            "weight": 5,
-                            "critical": false
-                        }
-                    ]
-                },
-                {
-                    "jobid": 40101,
-                    "tests": [
-                        {
-                            "dsid": 40101065,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101070,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101069,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101068,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101067,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101066,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101075,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101074,
-                            "weight": 5,
-                            "critical": false
-                        },
-                        {
-                            "dsid": 40101073,
-                            "weight": 5,
-                            "critical": false
-                        }
-                    ]
-                }
-            ]
-        }
-    ]
-}'
+CREATE OR REPLACE VIEW HEALTH_METRICS_DETAIL AS
+
+WITH DOMAIN_TEST_CONFIG AS
+(
+    SELECT
+        DSE_HEALTH_DOMAIN.HEALTH_AREA_ID,
+        DSE_HEALTH_DOMAIN.HEALTH_AREA_NAME,
+        DSE_HEALTH_DOMAIN.DOMAIN_ID,
+        DSE_HEALTH_DOMAIN.DOMAIN_NAME,
+
+        DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:domain_weight::NUMBER
+            AS DOMAIN_WEIGHT,
+
+        USECASE_CONFIG.VALUE:usecase_id::VARCHAR
+            AS USECASE_ID,
+
+        USECASE_CONFIG.VALUE:usecase_name::VARCHAR
+            AS USECASE_NAME,
+
+        USECASE_CONFIG.VALUE:usecase_weight::NUMBER
+            AS USECASE_WEIGHT,
+
+        JOB_CONFIG.VALUE:jobid::NUMBER
+            AS JOBID,
+
+        TEST_CONFIG.VALUE:dsid::VARCHAR
+            AS CONFIGURED_DSID,
+
+        TEST_CONFIG.VALUE:weight::NUMBER
+            AS DSID_WEIGHT,
+
+        TEST_CONFIG.VALUE:critical::BOOLEAN
+            AS CRITICAL_IND
+
+    FROM DSE_HEALTH_DOMAIN,
+
+    LATERAL FLATTEN
+    (
+        INPUT => DSE_HEALTH_DOMAIN.ASSOCIATED_JOBS:usecases
+    ) USECASE_CONFIG,
+
+    LATERAL FLATTEN
+    (
+        INPUT => USECASE_CONFIG.VALUE:jobs
+    ) JOB_CONFIG,
+
+    LATERAL FLATTEN
+    (
+        INPUT => JOB_CONFIG.VALUE:tests
+    ) TEST_CONFIG
+),
+
+DOMAIN_TEST_WITH_JOB AS
+(
+    SELECT
+        DOMAIN_TEST_CONFIG.HEALTH_AREA_ID,
+        DOMAIN_TEST_CONFIG.HEALTH_AREA_NAME,
+        DOMAIN_TEST_CONFIG.DOMAIN_ID,
+        DOMAIN_TEST_CONFIG.DOMAIN_NAME,
+        DOMAIN_TEST_CONFIG.DOMAIN_WEIGHT,
+        DOMAIN_TEST_CONFIG.USECASE_ID,
+        DOMAIN_TEST_CONFIG.USECASE_NAME,
+        DOMAIN_TEST_CONFIG.USECASE_WEIGHT,
+        DOMAIN_TEST_CONFIG.JOBID,
+        DSE_JOB_CONFIG.JOBNAME,
+        DOMAIN_TEST_CONFIG.CONFIGURED_DSID,
+        DOMAIN_TEST_CONFIG.DSID_WEIGHT,
+        DOMAIN_TEST_CONFIG.CRITICAL_IND
+
+    FROM DOMAIN_TEST_CONFIG
+
+    LEFT JOIN DSE_JOB_CONFIG
+        ON DOMAIN_TEST_CONFIG.JOBID =
+           DSE_JOB_CONFIG.JOBID
+
+       AND DSE_JOB_CONFIG.ENVIRONMENTID = 1
+),
+
+LATEST_JOB_RUN AS
+(
+    SELECT
+        DSE_TESTRESULTS.JOBNAME,
+        MAX(DSE_TESTRESULTS.RUNID) AS LATEST_RUNID
+
+    FROM DSE_TESTRESULTS
+
+    WHERE DSE_TESTRESULTS.ENVIRONMENTID = 1
+      AND COALESCE(DSE_TESTRESULTS.ACTIV_IND, 'Y') = 'Y'
+
+    GROUP BY
+        DSE_TESTRESULTS.JOBNAME
+),
+
+LATEST_TEST_RESULTS AS
+(
+    SELECT
+        DSE_TESTRESULTS.DSID,
+        DSE_TESTRESULTS.JOBNAME,
+        DSE_TESTRESULTS.EXECUTIONSTEP,
+        DSE_TESTRESULTS.TESTCASEDESCRIPTION,
+        DSE_TESTRESULTS.METRICRESULTS,
+        DSE_TESTRESULTS.TESTSTATUS,
+        DSE_TESTRESULTS.ACTIV_IND,
+        DSE_TESTRESULTS.RUNID,
+        DSE_TESTRESULTS.ENVIRONMENTID,
+        DSE_TESTRESULTS.RUNDATE
+
+    FROM DSE_TESTRESULTS
+
+    INNER JOIN LATEST_JOB_RUN
+        ON DSE_TESTRESULTS.JOBNAME =
+           LATEST_JOB_RUN.JOBNAME
+
+       AND DSE_TESTRESULTS.RUNID =
+           LATEST_JOB_RUN.LATEST_RUNID
+
+    WHERE DSE_TESTRESULTS.ENVIRONMENTID = 1
+      AND COALESCE(DSE_TESTRESULTS.ACTIV_IND, 'Y') = 'Y'
+),
+
+DSID_SCORE_CALCULATION AS
+(
+    SELECT
+        DOMAIN_TEST_WITH_JOB.HEALTH_AREA_ID,
+        DOMAIN_TEST_WITH_JOB.HEALTH_AREA_NAME,
+        DOMAIN_TEST_WITH_JOB.DOMAIN_ID,
+        DOMAIN_TEST_WITH_JOB.DOMAIN_NAME,
+        DOMAIN_TEST_WITH_JOB.DOMAIN_WEIGHT,
+        DOMAIN_TEST_WITH_JOB.USECASE_ID,
+        DOMAIN_TEST_WITH_JOB.USECASE_NAME,
+        DOMAIN_TEST_WITH_JOB.USECASE_WEIGHT,
+        DOMAIN_TEST_WITH_JOB.JOBID,
+        DOMAIN_TEST_WITH_JOB.JOBNAME,
+        DOMAIN_TEST_WITH_JOB.CONFIGURED_DSID AS DSID,
+        DOMAIN_TEST_WITH_JOB.DSID_WEIGHT,
+        DOMAIN_TEST_WITH_JOB.CRITICAL_IND,
+
+        COALESCE(
+            LATEST_TEST_RESULTS.TESTSTATUS,
+            'NO_DATA'
+        ) AS TESTSTATUS,
+
+        CASE
+            WHEN LATEST_TEST_RESULTS.DSID IS NULL
+                THEN 0
+
+            WHEN UPPER(LATEST_TEST_RESULTS.TESTSTATUS) IN
+                 (
+                     'PASS',
+                     'PASSED',
+                     'SUCCESS',
+                     'SUCCESSFUL'
+                 )
+                THEN 100
+
+            WHEN UPPER(LATEST_TEST_RESULTS.TESTSTATUS) IN
+                 (
+                     'WARNING',
+                     'WARN'
+                 )
+                THEN 50
+
+            WHEN UPPER(LATEST_TEST_RESULTS.TESTSTATUS) IN
+                 (
+                     'FAIL',
+                     'FAILED',
+                     'ERROR'
+                 )
+                THEN 0
+
+            ELSE 0
+        END AS TEST_SCORE,
+
+        LATEST_TEST_RESULTS.EXECUTIONSTEP,
+        LATEST_TEST_RESULTS.TESTCASEDESCRIPTION,
+        LATEST_TEST_RESULTS.METRICRESULTS,
+        LATEST_TEST_RESULTS.RUNID,
+        LATEST_TEST_RESULTS.RUNDATE
+
+    FROM DOMAIN_TEST_WITH_JOB
+
+    LEFT JOIN LATEST_TEST_RESULTS
+        ON DOMAIN_TEST_WITH_JOB.JOBNAME =
+           LATEST_TEST_RESULTS.JOBNAME
+
+       AND DOMAIN_TEST_WITH_JOB.CONFIGURED_DSID =
+           LATEST_TEST_RESULTS.DSID::VARCHAR
+),
+
+USECASE_SCORE_CALCULATION AS
+(
+    SELECT
+        DSID_SCORE_CALCULATION.*,
+
+        TEST_SCORE * DSID_WEIGHT
+        /
+        NULLIF(
+            SUM(DSID_WEIGHT) OVER
+            (
+                PARTITION BY
+                    HEALTH_AREA_ID,
+                    DOMAIN_ID,
+                    USECASE_ID
+            ),
+            0
+        ) AS DSID_WEIGHTED_CONTRIBUTION,
+
+        SUM(TEST_SCORE * DSID_WEIGHT) OVER
+        (
+            PARTITION BY
+                HEALTH_AREA_ID,
+                DOMAIN_ID,
+                USECASE_ID
+        )
+        /
+        NULLIF(
+            SUM(DSID_WEIGHT) OVER
+            (
+                PARTITION BY
+                    HEALTH_AREA_ID,
+                    DOMAIN_ID,
+                    USECASE_ID
+            ),
+            0
+        ) AS CALCULATED_USECASE_SCORE,
+
+        MAX(
+            CASE
+                WHEN CRITICAL_IND = TRUE
+                 AND TESTSTATUS IN
+                     (
+                         'FAIL',
+                         'FAILED',
+                         'ERROR',
+                         'NO_DATA'
+                     )
+                    THEN 1
+                ELSE 0
+            END
+        ) OVER
+        (
+            PARTITION BY
+                HEALTH_AREA_ID,
+                DOMAIN_ID,
+                USECASE_ID
+        ) AS CRITICAL_FAILURE_IND
+
+    FROM DSID_SCORE_CALCULATION
 )
-WHERE HEALTH_AREA_ID = '2'
-  AND DOMAIN_ID = '201';
+
+SELECT
+    HEALTH_AREA_ID,
+    HEALTH_AREA_NAME,
+    DOMAIN_ID,
+    DOMAIN_NAME,
+    DOMAIN_WEIGHT,
+    USECASE_ID,
+    USECASE_NAME,
+    USECASE_WEIGHT,
+    JOBID,
+    JOBNAME,
+    DSID,
+    TESTSTATUS,
+    TEST_SCORE,
+    DSID_WEIGHT,
+    DSID_WEIGHTED_CONTRIBUTION,
+    CRITICAL_IND,
+    CRITICAL_FAILURE_IND,
+
+    CASE
+        WHEN CRITICAL_FAILURE_IND = 1
+            THEN LEAST(CALCULATED_USECASE_SCORE, 50)
+        ELSE CALCULATED_USECASE_SCORE
+    END AS USECASE_SCORE,
+
+    EXECUTIONSTEP,
+    TESTCASEDESCRIPTION,
+    METRICRESULTS,
+    RUNID,
+    RUNDATE
+
+FROM USECASE_SCORE_CALCULATION;

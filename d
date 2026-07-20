@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -123,6 +124,7 @@ def initialize_session_state() -> None:
         "selected_usecase_id": None,
         "selected_job_id": None,
         "editor_revision": 0,
+        "add_dsid_revision": 0,
         "new_usecase_revision": 0,
         "last_saved_at": None,
         "flash_message": None,
@@ -153,6 +155,20 @@ def coerce_bool(value: Any) -> bool:
     if value is None:
         return False
     return clean_text(value).lower() in {"true", "1", "yes", "y", "t"}
+
+
+def parse_dsid_search_terms(search_text: Any) -> list[str]:
+    """Split comma, semicolon, tab, or new-line separated search values."""
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    for token in re.split(r"[,;\n\r\t]+", clean_text(search_text)):
+        normalized = token.strip().upper()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+
+    return terms
 
 
 def parse_variant_object(raw_value: Any) -> dict[str, Any]:
@@ -809,6 +825,7 @@ def open_context(
         st.session_state.selected_job_id = None
 
     next_editor_revision()
+    st.session_state.add_dsid_revision += 1
 
 
 def go_to(page_name: str) -> None:
@@ -1217,19 +1234,26 @@ def render_configuration() -> None:
         if not configured_for_usecase.empty
         else None
     )
+    default_job_id = (
+        preferred_job_id if preferred_job_id in job_ids else job_ids[0]
+    )
 
-    if st.session_state.selected_job_id not in job_ids:
-        st.session_state.selected_job_id = (
-            preferred_job_id if preferred_job_id in job_ids else job_ids[0]
-        )
+    job_selector_key = (
+        f"dsid_job_selector_"
+        f"{st.session_state.active_domain_id}_{selected_usecase_id}"
+    )
+    if (
+        job_selector_key not in st.session_state
+        or st.session_state[job_selector_key] not in job_ids
+    ):
+        st.session_state[job_selector_key] = default_job_id
 
     with selector_2:
         selected_job_id = st.selectbox(
             "Job",
             options=job_ids,
-            index=job_ids.index(st.session_state.selected_job_id),
             format_func=lambda value: f"{job_name_by_id.get(value, value)} ({value})",
-            key="dsid_job_selector",
+            key=job_selector_key,
         )
 
     st.session_state.selected_job_id = selected_job_id
@@ -1286,7 +1310,11 @@ def render_configuration() -> None:
                     ),
                     "JOBID": st.column_config.TextColumn("Job ID", width="small"),
                 },
-                key=f"configured_dsid_editor_{st.session_state.editor_revision}",
+                key=(
+                    f"configured_dsid_editor_"
+                    f"{st.session_state.editor_revision}_"
+                    f"{selected_usecase_id}_{selected_job_id}"
+                ),
             )
 
             if st.button(
@@ -1351,6 +1379,13 @@ def render_configuration() -> None:
                 .astype(str)
                 .str.strip()
             )
+            source_tests_df = (
+                source_tests_df.drop_duplicates(
+                    subset=["JOBID", "DSID"],
+                    keep="first",
+                )
+                .reset_index(drop=True)
+            )
         except Exception as error:
             st.error("Unable to load DSIDs for the selected Job.")
             st.exception(error)
@@ -1379,26 +1414,26 @@ def render_configuration() -> None:
         if available_df.empty:
             st.info("No additional DSIDs are available for this Job.")
         else:
+            add_dsid_revision = st.session_state.add_dsid_revision
             search_column, select_column = st.columns([4, 1])
+
+            search_key = (
+                f"available_dsid_search_"
+                f"{st.session_state.active_domain_id}_"
+                f"{selected_usecase_id}_{selected_job_id}_"
+                f"{add_dsid_revision}"
+            )
             with search_column:
                 dsid_search = st.text_input(
                     "Search DSIDs",
-                    placeholder="Enter a DSID, multiple DSIDs, or description text",
+                    placeholder="Paste one or many DSIDs, or enter description text",
                     help=(
-                        "Search by partial DSID or test description. "
-                        "For multiple DSIDs, separate values with commas or new lines."
+                        "Use commas, semicolons, tabs, or new lines between DSIDs."
                     ),
-                    key=(
-                        f"available_dsid_search_"
-                        f"{selected_usecase_id}_{selected_job_id}"
-                    ),
+                    key=search_key,
                 )
 
-            search_tokens = [
-                token.strip().upper()
-                for token in re.split(r"[,\\n]+", dsid_search)
-                if token.strip()
-            ]
+            search_tokens = parse_dsid_search_terms(dsid_search)
 
             if search_tokens:
                 dsid_values = available_df["DSID"].fillna("").astype(str).str.upper()
@@ -1421,16 +1456,19 @@ def render_configuration() -> None:
             else:
                 displayed_available_df = available_df.copy()
 
+            select_all_key = (
+                f"select_all_visible_"
+                f"{st.session_state.active_domain_id}_"
+                f"{selected_usecase_id}_{selected_job_id}_"
+                f"{add_dsid_revision}"
+            )
             with select_column:
                 st.write("")
                 st.write("")
                 select_all_visible = st.checkbox(
                     "Select all shown",
                     value=False,
-                    key=(
-                        f"select_all_visible_"
-                        f"{selected_usecase_id}_{selected_job_id}"
-                    ),
+                    key=select_all_key,
                     help="Select every DSID currently shown by the search filter.",
                 )
 
@@ -1448,11 +1486,9 @@ def render_configuration() -> None:
                 displayed_available_df.insert(1, "DSID_WEIGHT", 5)
                 displayed_available_df.insert(2, "CRITICAL", False)
 
-                search_signature = re.sub(
-                    r"[^A-Za-z0-9]+",
-                    "_",
-                    dsid_search.strip().upper(),
-                )[:40]
+                search_signature = hashlib.sha1(
+                    dsid_search.strip().upper().encode("utf-8")
+                ).hexdigest()[:12]
 
                 edited_available_df = st.data_editor(
                     displayed_available_df,
@@ -1495,8 +1531,10 @@ def render_configuration() -> None:
                     key=(
                         f"available_dsid_editor_"
                         f"{st.session_state.editor_revision}_"
+                        f"{add_dsid_revision}_"
                         f"{selected_usecase_id}_{selected_job_id}_"
-                        f"{search_signature}"
+                        f"{search_signature}_"
+                        f"{int(select_all_visible)}"
                     ),
                 )
 
@@ -1504,7 +1542,11 @@ def render_configuration() -> None:
                     "Add Selected DSIDs",
                     type="primary",
                     use_container_width=True,
-                    key="add_selected_dsids",
+                    key=(
+                        f"add_selected_dsids_"
+                        f"{st.session_state.active_domain_id}_"
+                        f"{selected_usecase_id}_{selected_job_id}"
+                    ),
                 ):
                     selected_rows = edited_available_df[
                         edited_available_df["SELECT"] == True
@@ -1562,6 +1604,7 @@ def render_configuration() -> None:
                                     "Selected DSIDs added and saved."
                                 )
                                 next_editor_revision()
+                                st.session_state.add_dsid_revision += 1
                                 st.rerun()
                             except Exception as error:
                                 st.error("Unable to add the selected DSIDs.")

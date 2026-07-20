@@ -1379,109 +1379,193 @@ def render_configuration() -> None:
         if available_df.empty:
             st.info("No additional DSIDs are available for this Job.")
         else:
-            available_df.insert(0, "SELECT", False)
-            available_df.insert(1, "DSID_WEIGHT", 5)
-            available_df.insert(2, "CRITICAL", False)
+            search_column, select_column = st.columns([4, 1])
+            with search_column:
+                dsid_search = st.text_input(
+                    "Search DSIDs",
+                    placeholder="Enter a DSID, multiple DSIDs, or description text",
+                    help=(
+                        "Search by partial DSID or test description. "
+                        "For multiple DSIDs, separate values with commas or new lines."
+                    ),
+                    key=(
+                        f"available_dsid_search_"
+                        f"{selected_usecase_id}_{selected_job_id}"
+                    ),
+                )
 
-            edited_available_df = st.data_editor(
-                available_df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                column_order=[
-                    "SELECT",
-                    "DSID_WEIGHT",
-                    "CRITICAL",
-                    "DSID",
-                    "TESTCASEDESCRIPTION",
-                ],
-                disabled=["DSID", "TESTCASEDESCRIPTION"],
-                column_config={
-                    "SELECT": st.column_config.CheckboxColumn(
-                        "Select", width="small"
-                    ),
-                    "DSID_WEIGHT": st.column_config.NumberColumn(
-                        "Weight",
-                        min_value=1,
-                        max_value=10,
-                        step=1,
-                        required=True,
-                        width="small",
-                        help="Relative importance inside this Use Case.",
-                    ),
-                    "CRITICAL": st.column_config.CheckboxColumn(
-                        "Critical",
-                        width="small",
-                        help="Select only for business-critical tests.",
-                    ),
-                    "DSID": st.column_config.TextColumn("DSID", width="medium"),
-                    "TESTCASEDESCRIPTION": st.column_config.TextColumn(
-                        "Test Case Description", width="large"
-                    ),
-                },
-                key=f"available_dsid_editor_{st.session_state.editor_revision}",
-            )
+            search_tokens = [
+                token.strip().upper()
+                for token in re.split(r"[,\\n]+", dsid_search)
+                if token.strip()
+            ]
 
-            if st.button(
-                "Add Selected DSIDs",
-                type="primary",
-                use_container_width=True,
-                key="add_selected_dsids",
-            ):
-                selected_rows = edited_available_df[
-                    edited_available_df["SELECT"] == True
-                ].copy()
+            if search_tokens:
+                dsid_values = available_df["DSID"].fillna("").astype(str).str.upper()
+                description_values = (
+                    available_df["TESTCASEDESCRIPTION"]
+                    .fillna("")
+                    .astype(str)
+                    .str.upper()
+                )
 
-                if selected_rows.empty:
-                    st.warning("Select at least one DSID.")
-                else:
-                    selected_rows["DSID_WEIGHT"] = pd.to_numeric(
-                        selected_rows["DSID_WEIGHT"], errors="coerce"
+                match_mask = pd.Series(False, index=available_df.index)
+                for token in search_tokens:
+                    match_mask = (
+                        match_mask
+                        | dsid_values.str.contains(token, regex=False)
+                        | description_values.str.contains(token, regex=False)
                     )
-                    if selected_rows["DSID_WEIGHT"].isna().any() or (
-                        ~selected_rows["DSID_WEIGHT"].between(1, 10)
-                    ).any():
-                        st.error("Every selected DSID Weight must be between 1 and 10.")
-                    else:
-                        try:
-                            new_rows: list[dict[str, Any]] = []
-                            for _, row in selected_rows.iterrows():
-                                new_rows.append(
-                                    {
-                                        "USECASE_ID": selected_usecase_id,
-                                        "JOBID": selected_job_id,
-                                        "JOBNAME": job_name_by_id.get(
-                                            selected_job_id, ""
-                                        ),
-                                        "DSID": clean_text(row["DSID"]),
-                                        "TESTCASEDESCRIPTION": clean_text(
-                                            row["TESTCASEDESCRIPTION"]
-                                        ),
-                                        "DSID_WEIGHT": int(row["DSID_WEIGHT"]),
-                                        "CRITICAL": coerce_bool(row["CRITICAL"]),
-                                    }
-                                )
 
-                            st.session_state.tests_df = normalize_tests(
-                                pd.concat(
-                                    [
-                                        tests_df,
-                                        pd.DataFrame(
-                                            new_rows,
-                                            columns=TEST_CONFIG_COLUMNS,
-                                        ),
-                                    ],
-                                    ignore_index=True,
+                displayed_available_df = available_df[match_mask].copy()
+            else:
+                displayed_available_df = available_df.copy()
+
+            with select_column:
+                st.write("")
+                st.write("")
+                select_all_visible = st.checkbox(
+                    "Select all shown",
+                    value=False,
+                    key=(
+                        f"select_all_visible_"
+                        f"{selected_usecase_id}_{selected_job_id}"
+                    ),
+                    help="Select every DSID currently shown by the search filter.",
+                )
+
+            if displayed_available_df.empty:
+                st.info("No DSIDs match the search.")
+            else:
+                st.caption(
+                    f"Showing {len(displayed_available_df)} of "
+                    f"{len(available_df)} available DSIDs"
+                )
+
+                displayed_available_df.insert(
+                    0, "SELECT", bool(select_all_visible)
+                )
+                displayed_available_df.insert(1, "DSID_WEIGHT", 5)
+                displayed_available_df.insert(2, "CRITICAL", False)
+
+                search_signature = re.sub(
+                    r"[^A-Za-z0-9]+",
+                    "_",
+                    dsid_search.strip().upper(),
+                )[:40]
+
+                edited_available_df = st.data_editor(
+                    displayed_available_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="fixed",
+                    column_order=[
+                        "SELECT",
+                        "DSID_WEIGHT",
+                        "CRITICAL",
+                        "DSID",
+                        "TESTCASEDESCRIPTION",
+                    ],
+                    disabled=["DSID", "TESTCASEDESCRIPTION"],
+                    column_config={
+                        "SELECT": st.column_config.CheckboxColumn(
+                            "Select", width="small"
+                        ),
+                        "DSID_WEIGHT": st.column_config.NumberColumn(
+                            "Weight",
+                            min_value=1,
+                            max_value=10,
+                            step=1,
+                            required=True,
+                            width="small",
+                            help="Relative importance inside this Use Case.",
+                        ),
+                        "CRITICAL": st.column_config.CheckboxColumn(
+                            "Critical",
+                            width="small",
+                            help="Select only for business-critical tests.",
+                        ),
+                        "DSID": st.column_config.TextColumn(
+                            "DSID", width="medium"
+                        ),
+                        "TESTCASEDESCRIPTION": st.column_config.TextColumn(
+                            "Test Case Description", width="large"
+                        ),
+                    },
+                    key=(
+                        f"available_dsid_editor_"
+                        f"{st.session_state.editor_revision}_"
+                        f"{selected_usecase_id}_{selected_job_id}_"
+                        f"{search_signature}"
+                    ),
+                )
+
+                if st.button(
+                    "Add Selected DSIDs",
+                    type="primary",
+                    use_container_width=True,
+                    key="add_selected_dsids",
+                ):
+                    selected_rows = edited_available_df[
+                        edited_available_df["SELECT"] == True
+                    ].copy()
+
+                    if selected_rows.empty:
+                        st.warning("Select at least one DSID.")
+                    else:
+                        selected_rows["DSID_WEIGHT"] = pd.to_numeric(
+                            selected_rows["DSID_WEIGHT"], errors="coerce"
+                        )
+                        if selected_rows["DSID_WEIGHT"].isna().any() or (
+                            ~selected_rows["DSID_WEIGHT"].between(1, 10)
+                        ).any():
+                            st.error(
+                                "Every selected DSID Weight must be between 1 and 10."
+                            )
+                        else:
+                            try:
+                                new_rows: list[dict[str, Any]] = []
+                                for _, row in selected_rows.iterrows():
+                                    new_rows.append(
+                                        {
+                                            "USECASE_ID": selected_usecase_id,
+                                            "JOBID": selected_job_id,
+                                            "JOBNAME": job_name_by_id.get(
+                                                selected_job_id, ""
+                                            ),
+                                            "DSID": clean_text(row["DSID"]),
+                                            "TESTCASEDESCRIPTION": clean_text(
+                                                row["TESTCASEDESCRIPTION"]
+                                            ),
+                                            "DSID_WEIGHT": int(
+                                                row["DSID_WEIGHT"]
+                                            ),
+                                            "CRITICAL": coerce_bool(
+                                                row["CRITICAL"]
+                                            ),
+                                        }
+                                    )
+
+                                st.session_state.tests_df = normalize_tests(
+                                    pd.concat(
+                                        [
+                                            tests_df,
+                                            pd.DataFrame(
+                                                new_rows,
+                                                columns=TEST_CONFIG_COLUMNS,
+                                            ),
+                                        ],
+                                        ignore_index=True,
+                                    )
                                 )
-                            )
-                            persist_current_configuration(
-                                "Selected DSIDs added and saved."
-                            )
-                            next_editor_revision()
-                            st.rerun()
-                        except Exception as error:
-                            st.error("Unable to add the selected DSIDs.")
-                            st.exception(error)
+                                persist_current_configuration(
+                                    "Selected DSIDs added and saved."
+                                )
+                                next_editor_revision()
+                                st.rerun()
+                            except Exception as error:
+                                st.error("Unable to add the selected DSIDs.")
+                                st.exception(error)
 
     render_saved_caption()
 
